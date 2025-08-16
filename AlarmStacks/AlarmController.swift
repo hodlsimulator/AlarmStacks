@@ -10,6 +10,10 @@ import Combine
 #if canImport(AlarmKit)
 import AlarmKit
 #endif
+import UserNotifications
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 final class AlarmController: ObservableObject {
@@ -51,8 +55,25 @@ final class AlarmController: ObservableObject {
             guard let self else { return }
             for await snapshot in manager.alarmUpdates {
                 await MainActor.run {
+                    let previousID = self.alertingAlarm?.id
                     self.lastSnapshot = snapshot
                     self.alertingAlarm = snapshot.first(where: { $0.state == .alerting })
+
+                    if let a = self.alertingAlarm {
+                        let locked = self.isDeviceLocked
+                        print("AK ALERTING id=\(a.id) countdown=\(String(describing: a.countdownDuration))")
+                        print("AK ALERT PRESENTED (locked? \(locked))")
+
+                        // If the device is LOCKED, cancel the +1s UN mirror so we don't duplicate the Lock Screen alert.
+                        if locked {
+                            Task { await self.cancelBoostNotification(forAKID: a.id) }
+                        }
+                    }
+
+                    // Transition change log
+                    if previousID != self.alertingAlarm?.id {
+                        // could add more diagnostics here
+                    }
                 }
             }
         }
@@ -76,8 +97,6 @@ final class AlarmController: ObservableObject {
 
     func snooze(_ id: UUID) {
         #if canImport(AlarmKit)
-        // If AlarmKit supports duration-based countdowns in your build, call that overload here.
-        // Otherwise we trigger the default AK countdown. The UN fallback path already uses per-step minutes.
         try? manager.countdown(id: id)
         #endif
     }
@@ -89,5 +108,25 @@ final class AlarmController: ObservableObject {
         #else
         return nil
         #endif
+    }
+
+    // MARK: - Helpers
+
+    /// Best-effort: true when the device is locked (protected data unavailable).
+    private var isDeviceLocked: Bool {
+        #if canImport(UIKit)
+        return !UIApplication.shared.isProtectedDataAvailable
+        #else
+        return false
+        #endif
+    }
+
+    /// Cancel the pending UN “boost” notification whose id is "ak-boost-<AKUUID>"
+    private func cancelBoostNotification(forAKID id: UUID) async {
+        let center = UNUserNotificationCenter.current()
+        let ident = "ak-boost-\(id.uuidString)"
+        // Remove pending; also remove delivered in case it squeaked through.
+        center.removePendingNotificationRequests(withIdentifiers: [ident])
+        center.removeDeliveredNotifications(withIdentifiers: [ident])
     }
 }

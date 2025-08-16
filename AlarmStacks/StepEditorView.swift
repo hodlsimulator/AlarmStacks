@@ -178,6 +178,14 @@ struct StepEditorView: View {
         step.soundName = soundName.isEmpty ? nil : soundName
 
         try? modelContext.save()
+
+        // Re-arm immediately so “one minute later” always fires.
+        if let s = step.stack, s.isArmed {
+            Task { @MainActor in
+                await AlarmScheduler.shared.cancelAll(for: s)
+                _ = try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)
+            }
+        }
     }
 
     private func formatSelectedDays(_ set: Set<Int>) -> String {

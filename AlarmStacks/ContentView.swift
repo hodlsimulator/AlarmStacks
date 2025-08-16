@@ -24,6 +24,16 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var shareItem: ShareItem?
 
+    // P0: Permission explainer (denied state) + re-arm on return
+    @State private var showingPermissionExplainer = false
+    @State private var permissionKind: PermissionKind = {
+        #if canImport(AlarmKit)
+        return .alarmkit
+        #else
+        return .notifications
+        #endif
+    }()
+
     var body: some View {
         NavigationStack {
             Group {
@@ -105,17 +115,20 @@ struct ContentView: View {
                 StepEditorView(step: step)
             }
         }
-        // Re-check permissions and reschedule when returning from Settings
+        // Re-check permissions and reschedule when returning from Settings / foreground
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 Task {
-                    _ = try? await AlarmScheduler.shared.requestAuthorizationIfNeeded()
+                    await checkPermissionsAndMaybeExplain()
                     await AlarmScheduler.shared.rescheduleAll(stacks: stacks.filter { $0.isArmed }, calendar: .current)
                 }
             }
         }
         // Also reschedule on significant time changes (DST, timezone, clock)
         .task {
+            // Initial permission check (shows explainer if denied)
+            await checkPermissionsAndMaybeExplain()
+
             for await _ in NotificationCenter.default.notifications(named: UIApplication.significantTimeChangeNotification) {
                 await AlarmScheduler.shared.rescheduleAll(stacks: stacks.filter { $0.isArmed }, calendar: .current)
             }
@@ -132,6 +145,11 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+        }
+        // P0: In-app explainer with Settings deep link
+        .sheet(isPresented: $showingPermissionExplainer) {
+            PermissionExplainerView(kind: permissionKind)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -247,6 +265,23 @@ struct ContentView: View {
         ]
         return s
     }
+
+    // MARK: - Permission check helper (P0)
+
+    @MainActor
+    private func checkPermissionsAndMaybeExplain() async {
+        do {
+            _ = try await AlarmScheduler.shared.requestAuthorizationIfNeeded()
+            showingPermissionExplainer = false
+        } catch {
+            #if canImport(AlarmKit)
+            permissionKind = .alarmkit
+            #else
+            permissionKind = .notifications
+            #endif
+            showingPermissionExplainer = true
+        }
+    }
 }
 
 // MARK: - Row
@@ -299,7 +334,7 @@ private struct StepChip: View {
         .background(.thinMaterial, in: Capsule())
     }
 
-    private func icon(for step: Step) -> String {
+    private func icon(for: Step) -> String {
         switch step.kind {
         case .fixedTime: return "alarm"
         case .timer: return "timer"

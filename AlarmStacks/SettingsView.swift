@@ -26,6 +26,13 @@ struct SettingsView: View {
                     .accessibilityHint("Changes will update any steps that are still using the previous default.")
                 }
 
+                Section("Alarms while unlocked") {
+                    Toggle("Boost with notification sound (may duplicate)", isOn: $settings.boostUnlockedWithUN)
+                    Text("Adds a same-moment notification sound alongside AlarmKit to make alarms harder to miss when you’re using the phone. Critical sound is used if allowed.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Maintenance") {
                     Button {
                         Task { await rescheduleAllArmed() }
@@ -53,7 +60,6 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            // Propagate default snooze changes to steps that still use the previous default.
             .onChange(of: settings.defaultSnoozeMinutes) { old, new in
                 propagateSnoozeDefaultChange(from: old, to: new)
             }
@@ -96,3 +102,4 @@ struct SettingsView: View {
         if updated > 0 { try? modelContext.save() }
     }
 }
+

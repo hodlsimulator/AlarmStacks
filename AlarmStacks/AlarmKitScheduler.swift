@@ -30,43 +30,52 @@ final class AppAlarmKitScheduler {
 
     func requestAuthorizationIfNeeded() async throws {
         let currentAuth = self.manager.authorizationState
-        self.log.info("AK authState=\(String(describing: currentAuth), privacy: .public)")
+        self.log.info("AK authState=\(String(describing: currentAuth))")
         switch currentAuth {
-        case .authorized: return
+        case .authorized:
+            return
         case .denied:
-            throw NSError(domain: "AlarmStacks", code: 1001,
-                          userInfo: [NSLocalizedDescriptionKey: "Alarm permission denied"])
+            throw NSError(
+                domain: "AlarmStacks",
+                code: 1001,
+                userInfo: [NSLocalizedDescriptionKey: "Alarm permission denied"]
+            )
         case .notDetermined:
             let state = try await self.manager.requestAuthorization()
-            self.log.info("AK requestAuthorization -> \(String(describing: state), privacy: .public)")
+            self.log.info("AK requestAuthorization -> \(String(describing: state))")
             guard state == .authorized else {
-                throw NSError(domain: "AlarmStacks", code: 1002,
-                              userInfo: [NSLocalizedDescriptionKey: "Alarm permission not granted"])
+                throw NSError(
+                    domain: "AlarmStacks",
+                    code: 1002,
+                    userInfo: [NSLocalizedDescriptionKey: "Alarm permission not granted"]
+                )
             }
         @unknown default:
-            throw NSError(domain: "AlarmStacks", code: 1003,
-                          userInfo: [NSLocalizedDescriptionKey: "Unknown AlarmKit authorisation state"])
+            throw NSError(
+                domain: "AlarmStacks",
+                code: 1003,
+                userInfo: [NSLocalizedDescriptionKey: "Unknown AlarmKit authorisation state"]
+            )
         }
     }
 
-    // MARK: - Scheduling (timers only; fixed-time converted to countdown)
+    // MARK: - Scheduling (AlarmKit for truth; optional UN boost for unlocked)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
-        // Prefer AK; if it fails, fall back to local UN scheduling.
         do { try await requestAuthorizationIfNeeded() }
         catch {
-            self.log.error("AK auth error -> using UN fallback: \(error as NSError, privacy: .public)")
+            self.log.error("AK auth error -> UN fallback: \(error as NSError)")
             return try await UN_schedule(stack: stack, calendar: calendar)
         }
 
-        await cancelAll(for: stack) // clear persisted AK IDs and any UN notifs
+        await cancelAll(for: stack)
+        await UN_cancelAllBoosts() // clean any stray boosts
 
         var lastFireDate = Date()
         var akIDs: [UUID] = []
-        var akFailed = false
         var failureError: NSError?
 
-        for step in stack.sortedSteps where step.isEnabled {
-            // Compute target wall-clock time for this step
+        for (index, step) in stack.sortedSteps.enumerated() where step.isEnabled {
+            // Target fire date
             let fireDate: Date
             switch step.kind {
             case .fixedTime:
@@ -77,7 +86,7 @@ final class AppAlarmKitScheduler {
                 lastFireDate = fireDate
             }
 
-            // Build alert + attributes (IMPORTANT: set .countdown for snooze)
+            // Build AK alert + attributes
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
@@ -87,41 +96,51 @@ final class AppAlarmKitScheduler {
             let id = UUID()
 
             do {
-                self.log.info("AK scheduling TIMER id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s for \"\(stack.name, privacy: .public) — \(step.title, privacy: .public)\"")
+                self.log.info("AK scheduling TIMER(id fallback) id=\(id.uuidString) in \(seconds)s for \"\(stack.name) — \(step.title)\"")
+
+                // Your AlarmKit build supports only: .timer(duration:, attributes:)
                 let cfg: AlarmManager.AlarmConfiguration<AKVoidMetadata> =
                     .timer(duration: TimeInterval(seconds), attributes: attrs)
+
                 _ = try await self.manager.schedule(id: id, configuration: cfg)
 
-                // Persist per-step snooze minutes for in-app overlay labelling.
+                // Persist per-step snooze minutes for overlay labelling
                 AlarmKitSnoozeMap.set(minutes: step.effectiveSnoozeMinutes, for: id)
-
                 akIDs.append(id)
+
+                // Optional “boost”: if unlocked in another app, AK can be subtle (single buzz).
+                // We mirror with Time-Sensitive UN banners + sound at +1s (and a couple more pings).
+                if Settings.shared.boostUnlockedWithUN {
+                    await UN_scheduleMirrorBoostSequence(forAKID: id,
+                                                         stack: stack,
+                                                         step: step,
+                                                         firstFireDate: fireDate.addingTimeInterval(1),
+                                                         calendar: calendar)
+                }
+
             } catch {
-                akFailed = true
                 failureError = (error as NSError)
-                self.log.error("AK schedule error id=\(id.uuidString, privacy: .public): \(error as NSError, privacy: .public)")
+                self.log.error("AK schedule error id=\(id.uuidString): \(error as NSError)")
                 break
             }
         }
 
-        if akFailed {
-            // Roll back anything we placed with AK, then fall back to notifications.
+        if let err = failureError {
             for u in akIDs {
                 try? self.manager.cancel(id: u)
                 AlarmKitSnoozeMap.remove(for: u)
             }
-            self.log.warning("AK fallback -> UN notifications for stack \"\(stack.name, privacy: .public)\". reason=\(String(describing: failureError), privacy: .public)")
+            self.log.warning("AK fallback -> UN notifications for stack \"\(stack.name)\". reason=\(String(describing: err))")
             return try await UN_schedule(stack: stack, calendar: calendar)
         } else {
             let strings = akIDs.map(\.uuidString)
             self.defaults.set(strings, forKey: storageKey(for: stack))
-            self.log.info("AK scheduled \(strings.count, privacy: .public) timer(s) for stack \"\(stack.name, privacy: .public)\"")
+            self.log.info("AK scheduled \(strings.count) item(s) for stack \"\(stack.name)\"")
             return strings
         }
     }
 
     func cancelAll(for stack: Stack) async {
-        // Cancel AK timers we persisted.
         let key = storageKey(for: stack)
         let ids = (self.defaults.stringArray(forKey: key) ?? []).compactMap(UUID.init(uuidString:))
         for id in ids {
@@ -130,8 +149,8 @@ final class AppAlarmKitScheduler {
         AlarmKitSnoozeMap.removeAll(for: ids)
         self.defaults.removeObject(forKey: key)
 
-        // Also cancel any notifications created by fallback.
         await UN_cancelAll(for: stack)
+        await UN_cancelAllBoosts()
     }
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
@@ -149,7 +168,6 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
     let stop = AlarmButton(text: LocalizedStringResource("Stop"), textColor: .white, systemImageName: "stop.fill")
     if allowSnooze {
         let snooze = AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "zzz")
-        // Explicit snooze behaviour so AK doesn't expect a custom App Intent.
         return AlarmPresentation.Alert(
             title: title,
             stopButton: stop,
@@ -167,34 +185,36 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
 }
 
 private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<AKVoidMetadata> {
-    // Calmer blue accent for AK prompts.
     AlarmAttributes(
         presentation: AlarmPresentation(alert: alert),
         tintColor: Color(hex: "#0A84FF")
     )
 }
 
-// MARK: - Local UN fallback (decoupled from UserNotificationScheduler)
+// MARK: - UN fallback (full stack) — unchanged, used when AK unavailable
 
 @MainActor
 private func UN_schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
     let center = UNUserNotificationCenter.current()
-    let settings = await center.notificationSettings()
+    var settings = await center.notificationSettings()
     if settings.authorizationStatus == .notDetermined {
         let granted = try await center.requestAuthorization(
-            options: [.alert, .sound, .badge, .providesAppNotificationSettings, .criticalAlert]
+            options: [.alert, .sound, .badge, .providesAppNotificationSettings]
         )
         if !granted {
             throw NSError(domain: "AlarmStacks",
                           code: 2001,
                           userInfo: [NSLocalizedDescriptionKey: "Notifications permission denied"])
         }
+        settings = await center.notificationSettings()
     }
 
     await UN_cancelAll(for: stack)
 
     var identifiers: [String] = []
     var lastFireDate: Date = Date()
+
+    let sound = await UN_bestSound()
 
     for (index, step) in stack.sortedSteps.enumerated() where step.isEnabled {
         let fireDate: Date
@@ -208,12 +228,11 @@ private func UN_schedule(stack: Stack, calendar: Calendar = .current) async thro
         }
 
         let id = "stack-\(stack.id.uuidString)-step-\(step.id.uuidString)-\(index)"
-        let content = UN_buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString)
+        let content = UN_buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString, sound: sound)
 
         let trigger: UNNotificationTrigger
         if step.kind == .fixedTime || step.kind == .relativeToPrev {
-            let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second],
-                                                from: fireDate)
+            let comps = calendar.dateComponents([.year,.month,.day,.hour,.minute,.second], from: fireDate)
             trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
         } else {
             let interval = max(1, Int(fireDate.timeIntervalSinceNow.rounded()))
@@ -228,6 +247,65 @@ private func UN_schedule(stack: Stack, calendar: Calendar = .current) async thro
     return identifiers
 }
 
+// MARK: - UN “mirror boost” sequence for unlocked (soundy banners)
+
+@MainActor
+private func UN_scheduleMirrorBoostSequence(forAKID akID: UUID,
+                                            stack: Stack,
+                                            step: Step,
+                                            firstFireDate: Date,
+                                            calendar: Calendar) async {
+    let count = max(1, Settings.shared.unlockedBoostCount)
+    let spacing = max(1, Settings.shared.unlockedBoostSpacingSeconds)
+    let center = UNUserNotificationCenter.current()
+    var settings = await center.notificationSettings()
+    if settings.authorizationStatus == .notDetermined {
+        _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge, .providesAppNotificationSettings])
+        settings = await center.notificationSettings()
+    }
+
+    let sound = await UN_bestSound()
+
+    for i in 0..<count {
+        let when = firstFireDate.addingTimeInterval(TimeInterval(i * spacing))
+        let id = "ak-boost-\(akID.uuidString)-\(i)"
+
+        let content = UN_buildContent(for: step,
+                                      stackName: stack.name,
+                                      stackID: "akboost-\(stack.id.uuidString)",
+                                      sound: sound)
+
+        let trigger: UNNotificationTrigger
+        if step.kind == .fixedTime || step.kind == .relativeToPrev {
+            let comps = calendar.dateComponents([.year,.month,.day,.hour,.minute,.second], from: when)
+            trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        } else {
+            let interval = max(1, Int(when.timeIntervalSinceNow.rounded()))
+            trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(interval), repeats: false)
+        }
+
+        let req = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+        try? await center.add(req)
+    }
+
+    let mirrorLog = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "UNMirror")
+    mirrorLog.info("UN mirror scheduled \(count) boost ping(s) for AK id \(akID.uuidString)")
+}
+
+@MainActor
+private func UN_bestSound() async -> UNNotificationSound {
+    let s = await UNUserNotificationCenter.current().notificationSettings()
+    if #available(iOS 15.0, *), s.criticalAlertSetting == .enabled {
+        return UNNotificationSound.defaultCriticalSound(withAudioVolume: 1.0)
+    }
+    if Bundle.main.url(forResource: "AlarmLoud", withExtension: "caf") != nil {
+        return UNNotificationSound(named: UNNotificationSoundName(rawValue: "AlarmLoud.caf"))
+    }
+    return UNNotificationSound.default
+}
+
+// MARK: - UN helpers
+
 @MainActor
 private func UN_cancelAll(for stack: Stack) async {
     let center = UNUserNotificationCenter.current()
@@ -237,6 +315,15 @@ private func UN_cancelAll(for stack: Stack) async {
     center.removePendingNotificationRequests(withIdentifiers: pending)
 
     let delivered = await UN_deliveredIDs(prefix: prefix)
+    center.removeDeliveredNotifications(withIdentifiers: delivered)
+}
+
+@MainActor
+private func UN_cancelAllBoosts() async {
+    let center = UNUserNotificationCenter.current()
+    let pending = await UN_pendingIDs(prefix: "ak-boost-")
+    center.removePendingNotificationRequests(withIdentifiers: pending)
+    let delivered = await UN_deliveredIDs(prefix: "ak-boost-")
     center.removeDeliveredNotifications(withIdentifiers: delivered)
 }
 
@@ -254,12 +341,15 @@ private func UN_deliveredIDs(prefix: String) async -> [String] {
     return delivered.map(\.request.identifier).filter { $0.hasPrefix(prefix) }
 }
 
-private func UN_buildContent(for step: Step, stackName: String, stackID: String) -> UNMutableNotificationContent {
+private func UN_buildContent(for step: Step,
+                             stackName: String,
+                             stackID: String,
+                             sound: UNNotificationSound) -> UNMutableNotificationContent {
     let content = UNMutableNotificationContent()
     content.title = stackName
     content.subtitle = step.title
     content.body = UN_body(for: step)
-    content.sound = .default
+    content.sound = sound
     content.interruptionLevel = .timeSensitive
     content.threadIdentifier = "stack-\(stackID)"
     content.categoryIdentifier = "ALARM_CATEGORY"

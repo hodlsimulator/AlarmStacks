@@ -146,6 +146,8 @@ extension Step {
     /// - fixedTime: next occurrence of (weekdays? OR legacy weekday? OR any day) at hour:minute
     /// - timer: base + duration, then apply optional `everyNDays` gating
     /// - relativeToPrev: base + offset
+    ///
+    /// P0: Robust for DST / time zone transitions by consistently using `Calendar.nextDate(...)`.
     func nextFireDate(basedOn base: Date, calendar: Calendar = .current) throws -> Date {
         switch kind {
         case .timer:
@@ -202,9 +204,17 @@ extension Step {
                 throw SchedulingError.invalidInputs
             }
 
-            // No weekday constraints: today at hour:minute, or tomorrow if already passed
-            if let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start) {
-                return today > start ? today : calendar.date(byAdding: .day, value: 1, to: today)!
+            // No weekday constraints: use nextDate to handle DST-missing times (e.g. 02:30 on spring forward).
+            var comps = DateComponents()
+            comps.hour = hour
+            comps.minute = minute
+            if let next = calendar.nextDate(
+                after: start,
+                matching: comps,
+                matchingPolicy: .nextTimePreservingSmallerComponents,
+                direction: .forward
+            ) {
+                return next
             }
             throw SchedulingError.invalidInputs
         }
