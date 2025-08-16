@@ -7,10 +7,6 @@
 
 import SwiftUI
 import SwiftData
-import UserNotifications
-#if canImport(AlarmKit)
-import AlarmKit
-#endif
 
 // Wrapper so we can use `.sheet(item:)` for export
 private struct ShareItem: Identifiable {
@@ -27,10 +23,6 @@ struct ContentView: View {
     @State private var showingAddStack = false
     @State private var showingSettings = false
     @State private var shareItem: ShareItem?
-
-    // Permissions explainer
-    @State private var showPermissionHelp = false
-    @State private var deniedPermissionKind: PermissionKind = .notifications
 
     var body: some View {
         NavigationStack {
@@ -113,19 +105,16 @@ struct ContentView: View {
                 StepEditorView(step: step)
             }
         }
-        // Auto-reschedule when app becomes active or time changes
+        // Re-check permissions and reschedule when returning from Settings
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
-                // Start AK observers and re-check permissions on foreground.
-                AlarmController.shared.startObserversIfNeeded()
                 Task {
-                    await checkPermissions()
+                    _ = try? await AlarmScheduler.shared.requestAuthorizationIfNeeded()
                     await AlarmScheduler.shared.rescheduleAll(stacks: stacks.filter { $0.isArmed }, calendar: .current)
                 }
-            } else if phase == .background {
-                AlarmController.shared.cancelObservers()
             }
         }
+        // Also reschedule on significant time changes (DST, timezone, clock)
         .task {
             for await _ in NotificationCenter.default.notifications(named: UIApplication.significantTimeChangeNotification) {
                 await AlarmScheduler.shared.rescheduleAll(stacks: stacks.filter { $0.isArmed }, calendar: .current)
@@ -143,34 +132,6 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
-        }
-        // Permissions explainer
-        .sheet(isPresented: $showPermissionHelp) {
-            PermissionExplainerView(kind: deniedPermissionKind)
-                .presentationDetents([.medium, .large])
-        }
-        // Kick off an initial permissions check on first appearance.
-        .task {
-            await checkPermissions()
-        }
-    }
-
-    // MARK: - Permissions
-
-    private func checkPermissions() async {
-        #if canImport(AlarmKit)
-        let akState = AlarmManager.shared.authorizationState
-        if akState == .denied {
-            deniedPermissionKind = .alarmkit
-            showPermissionHelp = true
-            return
-        }
-        #endif
-        let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-        if settings.authorizationStatus == .denied {
-            deniedPermissionKind = .notifications
-            showPermissionHelp = true
         }
     }
 
@@ -223,11 +184,13 @@ struct ContentView: View {
                  hour: s.hour,
                  minute: s.minute,
                  weekday: s.weekday,
+                 weekdays: s.weekdays,
                  durationSeconds: s.durationSeconds,
                  offsetSeconds: s.offsetSeconds,
                  soundName: s.soundName,
                  allowSnooze: s.allowSnooze,
                  snoozeMinutes: s.snoozeMinutes,
+                 everyNDays: s.everyNDays,
                  stack: copy)
         }
         withAnimation {
@@ -262,6 +225,8 @@ struct ContentView: View {
         let now = Date()
         let settings = Settings.shared
         let wake = Step(title: "Wake", kind: .fixedTime, order: 0, createdAt: now, hour: 6, minute: 30, allowSnooze: settings.defaultAllowSnooze, snoozeMinutes: settings.defaultSnoozeMinutes, stack: s)
+        // Example: Weekdays for Wake
+        wake.weekdays = [2,3,4,5,6]
         let hydrate = Step(title: "Hydrate", kind: .relativeToPrev, order: 1, createdAt: now, offsetSeconds: 10*60, allowSnooze: false, snoozeMinutes: settings.defaultSnoozeMinutes, stack: s)
         let stretch = Step(title: "Stretch", kind: .timer, order: 2, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: settings.defaultSnoozeMinutes, stack: s)
         let shower = Step(title: "Shower", kind: .relativeToPrev, order: 3, createdAt: now, offsetSeconds: 20*60, allowSnooze: false, snoozeMinutes: settings.defaultSnoozeMinutes, stack: s)
@@ -345,8 +310,11 @@ private struct StepChip: View {
     private func label(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
-            if let h = step.hour, let m = step.minute { return String(format: "%02d:%02d  %@", h, m, step.title) }
-            return step.title
+            var time = "Time"
+            if let h = step.hour, let m = step.minute { time = String(format: "%02d:%02d", h, m) }
+            let days = daysText(for: step)
+            if days.isEmpty { return "\(time)  \(step.title)" }
+            return "\(time) • \(days)  \(step.title)"
         case .timer:
             if let s = step.durationSeconds { return "\(format(seconds: s))  \(step.title)" }
             return step.title
@@ -361,6 +329,24 @@ private struct StepChip: View {
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m" }
         return "\(s)s"
+    }
+
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty {
+            chosen = arr
+        } else if let one = step.weekday {
+            chosen = [one]
+        } else {
+            return ""
+        }
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
     }
 }
 
@@ -467,11 +453,13 @@ private struct StackDetailView: View {
                  hour: s.hour,
                  minute: s.minute,
                  weekday: s.weekday,
+                 weekdays: s.weekdays,
                  durationSeconds: s.durationSeconds,
                  offsetSeconds: s.offsetSeconds,
                  soundName: s.soundName,
                  allowSnooze: s.allowSnooze,
                  snoozeMinutes: s.snoozeMinutes,
+                 everyNDays: s.everyNDays,
                  stack: copy)
         }
         withAnimation {
@@ -494,13 +482,20 @@ private struct StepRow: View {
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
-    private func detailText(for: Step) -> String {
+    private func detailText(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
-            if let h = step.hour, let m = step.minute { return String(format: "Fixed • %02d:%02d", h, m) }
-            return "Fixed"
+            var time = "Fixed"
+            if let h = step.hour, let m = step.minute { time = String(format: "Fixed • %02d:%02d", h, m) }
+            let days = daysText(for: step)
+            return days.isEmpty ? time : "\(time) • \(days)"
         case .timer:
-            if let s = step.durationSeconds { return "Timer • \(format(seconds: s))" }
+            if let s = step.durationSeconds {
+                if let n = step.everyNDays, n > 1 {
+                    return "Timer • \(format(seconds: s)) • every \(n) days"
+                }
+                return "Timer • \(format(seconds: s))"
+            }
             return "Timer"
         case .relativeToPrev:
             if let s = step.offsetSeconds { return "After previous • +\(format(seconds: s))" }
@@ -513,161 +508,22 @@ private struct StepRow: View {
         if m > 0 { return "\(m)m \(s)s" }
         return "\(s)s"
     }
-}
-
-// MARK: - Add Stack / Step
-
-private struct AddStackSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-
-    @State private var name: String = ""
-    @State private var addFirstStep = true
-    @State private var firstStepKind: StepKind = .fixedTime
-    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
-    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
-    @State private var minutesAmount: Int = 10
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Stack") {
-                    TextField("Name", text: $name)
-                }
-                Section("First step") {
-                    Toggle("Add a first step", isOn: $addFirstStep)
-                    if addFirstStep {
-                        Picker("Kind", selection: $firstStepKind) {
-                            Text("Fixed time").tag(StepKind.fixedTime)
-                            Text("Timer").tag(StepKind.timer)
-                            Text("After previous").tag(StepKind.relativeToPrev)
-                        }
-                        if firstStepKind == .fixedTime {
-                            Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
-                            Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
-                        } else {
-                            Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
-                        }
-                    }
-                }
-            }
-            .navigationTitle("New Stack")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") { createStack() }
-                }
-            }
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty {
+            chosen = arr
+        } else if let one = step.weekday {
+            chosen = [one]
+        } else {
+            return ""
         }
-    }
-
-    private func createStack() {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
-
-        if addFirstStep {
-            let order = 0
-            let def = Settings.shared
-            let step: Step
-            switch firstStepKind {
-            case .fixedTime:
-                step = Step(title: "Wake",
-                            kind: .fixedTime,
-                            order: order,
-                            hour: hour, minute: minute,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
-            case .timer:
-                step = Step(title: "Timer",
-                            kind: .timer,
-                            order: order,
-                            durationSeconds: minutesAmount * 60,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
-            case .relativeToPrev:
-                step = Step(title: "After previous",
-                            kind: .relativeToPrev,
-                            order: order,
-                            offsetSeconds: minutesAmount * 60,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
-            }
-            s.steps = [step]
-        }
-
-        withAnimation {
-            modelContext.insert(s)
-        }
-        try? modelContext.save()
-        dismiss()
-    }
-}
-
-private struct AddStepSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-
-    let stack: Stack
-
-    @State private var title: String = ""
-    @State private var kind: StepKind = .fixedTime
-    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
-    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
-    @State private var minutesAmount: Int = 10
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Basics") {
-                    TextField("Title", text: $title)
-                    Picker("Kind", selection: $kind) {
-                        Text("Fixed time").tag(StepKind.fixedTime)
-                        Text("Timer").tag(StepKind.timer)
-                        Text("After previous").tag(StepKind.relativeToPrev)
-                    }
-                }
-                if kind == .fixedTime {
-                    Section("Time") {
-                        Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
-                        Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
-                    }
-                } else {
-                    Section(kind == .timer ? "Duration" : "Offset") {
-                        Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
-                    }
-                }
-            }
-            .navigationTitle("Add Step")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") { addStep() }
-                    .disabled(title.isEmpty)
-                }
-            }
-        }
-    }
-
-    private func addStep() {
-        let order = (stack.sortedSteps.last?.order ?? -1) + 1
-        let def = Settings.shared
-        let step: Step
-        switch kind {
-        case .fixedTime:
-            step = Step(title: title, kind: .fixedTime, order: order, hour: hour, minute: minute, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: stack)
-        case .timer:
-            step = Step(title: title, kind: .timer, order: order, durationSeconds: minutesAmount * 60, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: stack)
-        case .relativeToPrev:
-            step = Step(title: title, kind: .relativeToPrev, order: order, offsetSeconds: minutesAmount * 60, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: stack)
-        }
-        withAnimation {
-            stack.steps.append(step)
-        }
-        try? modelContext.save()
-        dismiss()
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
     }
 }
 

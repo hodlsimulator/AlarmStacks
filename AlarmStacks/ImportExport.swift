@@ -27,11 +27,13 @@ struct ExportStep: Codable {
     var hour: Int?
     var minute: Int?
     var weekday: Int?
+    var weekdays: [Int]?     // NEW
     var durationSeconds: Int?
     var offsetSeconds: Int?
     var soundName: String?
     var allowSnooze: Bool
     var snoozeMinutes: Int
+    var everyNDays: Int?     // NEW
 }
 
 // MARK: - Builders
@@ -53,11 +55,13 @@ func makeExport(from stack: Stack) -> ExportStack {
                 hour: s.hour,
                 minute: s.minute,
                 weekday: s.weekday,
+                weekdays: s.weekdays,
                 durationSeconds: s.durationSeconds,
                 offsetSeconds: s.offsetSeconds,
                 soundName: s.soundName,
                 allowSnooze: s.allowSnooze,
-                snoozeMinutes: s.snoozeMinutes
+                snoozeMinutes: s.snoozeMinutes,
+                everyNDays: s.everyNDays
             )
         }
     )
@@ -90,11 +94,13 @@ func importStacks(from data: Data, into context: ModelContext) throws -> [Stack]
                 hour: e.hour,
                 minute: e.minute,
                 weekday: e.weekday,
+                weekdays: e.weekdays,
                 durationSeconds: e.durationSeconds,
                 offsetSeconds: e.offsetSeconds,
                 soundName: e.soundName,
                 allowSnooze: e.allowSnooze,
                 snoozeMinutes: e.snoozeMinutes,
+                everyNDays: e.everyNDays,
                 stack: stack
             )
         }

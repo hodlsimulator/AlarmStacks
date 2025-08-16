@@ -11,7 +11,7 @@ import SwiftData
 // MARK: - StepKind
 
 enum StepKind: Int, Codable, CaseIterable, Sendable {
-    case fixedTime        // e.g. 06:30 (optionally a weekday)
+    case fixedTime        // e.g. 06:30 (optionally a weekday or multiple weekdays)
     case timer            // e.g. 25 minutes
     case relativeToPrev   // e.g. +10 minutes after previous step
 }
@@ -69,12 +69,17 @@ final class Step {
     var isEnabled: Bool
     var createdAt: Date
 
-    // fixedTime: hour/minute (24h). Optional weekday (1...7, Sunday = 1)
+    // fixedTime: hour/minute (24h). Repeat on specific weekdays (1...7, Sunday = 1).
     var hour: Int?            // 0...23
     var minute: Int?          // 0...59
+
+    /// Legacy single weekday (kept for compatibility). If `weekdays` is set, it takes precedence.
     var weekday: Int?         // 1...7 (nil = any day / next occurrence)
 
-    // timer: duration in seconds
+    /// New: multiple weekdays. If non-empty, restrict fixed-time to these days (1...7; Sunday=1).
+    var weekdays: [Int]?      // nil or [] = any day
+
+    // timer: duration in seconds (+ optional cadence)
     var durationSeconds: Int?
 
     // relativeToPrev: offset (+/-) in seconds from the previous step time
@@ -84,6 +89,9 @@ final class Step {
     var soundName: String?
     var allowSnooze: Bool
     var snoozeMinutes: Int
+
+    /// New: for timer steps, only fire on days where (days since base) % N == 0. Example: N=2 -> every 2 days.
+    var everyNDays: Int?      // timers only; >= 1 (nil -> no cadence gating)
 
     // Inverse inferred by SwiftData (Stack.steps <-> Step.stack)
     var stack: Stack?
@@ -98,11 +106,13 @@ final class Step {
         hour: Int? = nil,
         minute: Int? = nil,
         weekday: Int? = nil,
+        weekdays: [Int]? = nil,
         durationSeconds: Int? = nil,
         offsetSeconds: Int? = nil,
         soundName: String? = nil,
         allowSnooze: Bool = true,
         snoozeMinutes: Int = 9,
+        everyNDays: Int? = nil,
         stack: Stack? = nil
     ) {
         self.id = id
@@ -114,11 +124,13 @@ final class Step {
         self.hour = hour
         self.minute = minute
         self.weekday = weekday
+        self.weekdays = weekdays
         self.durationSeconds = durationSeconds
         self.offsetSeconds = offsetSeconds
         self.soundName = soundName
         self.allowSnooze = allowSnooze
         self.snoozeMinutes = snoozeMinutes
+        self.everyNDays = everyNDays
         self.stack = stack
     }
 }
@@ -131,15 +143,19 @@ enum SchedulingError: Error {
 
 extension Step {
     /// Returns the next wall-clock `Date` this step should fire at, based on `base`.
-    /// - fixedTime: next occurrence of (weekday?, hour, minute)
-    /// - timer: base + duration
+    /// - fixedTime: next occurrence of (weekdays? OR legacy weekday? OR any day) at hour:minute
+    /// - timer: base + duration, then apply optional `everyNDays` gating
     /// - relativeToPrev: base + offset
     func nextFireDate(basedOn base: Date, calendar: Calendar = .current) throws -> Date {
         switch kind {
         case .timer:
             guard let seconds = durationSeconds, seconds > 0
             else { throw SchedulingError.invalidInputs }
-            return base.addingTimeInterval(TimeInterval(seconds))
+            let tentative = base.addingTimeInterval(TimeInterval(seconds))
+            if let n = everyNDays, n > 1 {
+                return alignToEveryNDays(from: base, candidate: tentative, n: n, calendar: calendar)
+            }
+            return tentative
 
         case .relativeToPrev:
             guard let delta = offsetSeconds
@@ -148,13 +164,35 @@ extension Step {
 
         case .fixedTime:
             guard let hour, let minute else { throw SchedulingError.invalidInputs }
-            var comps = DateComponents()
-            comps.hour = hour
-            comps.minute = minute
-
             let start = base
+
+            // If multi-weekday selection exists, find the earliest next among them.
+            if let days = weekdays?.filter({ (1...7).contains($0) }), !days.isEmpty {
+                var best: Date?
+                for d in days {
+                    var comps = DateComponents()
+                    comps.weekday = d
+                    comps.hour = hour
+                    comps.minute = minute
+                    if let next = calendar.nextDate(
+                        after: start,
+                        matching: comps,
+                        matchingPolicy: .nextTimePreservingSmallerComponents,
+                        direction: .forward
+                    ) {
+                        if best == nil || next < best! { best = next }
+                    }
+                }
+                if let best { return best }
+                throw SchedulingError.invalidInputs
+            }
+
+            // Legacy: single weekday
             if let weekday {
-                comps.weekday = weekday  // 1 = Sunday
+                var comps = DateComponents()
+                comps.weekday = weekday
+                comps.hour = hour
+                comps.minute = minute
                 if let next = calendar.nextDate(
                     after: start,
                     matching: comps,
@@ -162,12 +200,27 @@ extension Step {
                     direction: .forward
                 ) { return next }
                 throw SchedulingError.invalidInputs
-            } else {
-                // Today at hour:minute, or tomorrow if already passed
-                let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start)!
+            }
+
+            // No weekday constraints: today at hour:minute, or tomorrow if already passed
+            if let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start) {
                 return today > start ? today : calendar.date(byAdding: .day, value: 1, to: today)!
             }
+            throw SchedulingError.invalidInputs
         }
+    }
+
+    /// Align the candidate date forward to the next day that satisfies "every N days"
+    /// measured from the `base` day boundary, preserving the time-of-day.
+    private func alignToEveryNDays(from base: Date, candidate: Date, n: Int, calendar: Calendar) -> Date {
+        guard n > 1 else { return candidate }
+        let baseDay = calendar.startOfDay(for: base)
+        let candDay = calendar.startOfDay(for: candidate)
+        let deltaDays = calendar.dateComponents([.day], from: baseDay, to: candDay).day ?? 0
+        let mod = ((deltaDays % n) + n) % n
+        if mod == 0 { return candidate }
+        // Bump forward by the remaining days to land on the cadence.
+        return calendar.date(byAdding: .day, value: (n - mod), to: candidate) ?? candidate
     }
 
     /// Kept for clarity; currently equals `snoozeMinutes`.

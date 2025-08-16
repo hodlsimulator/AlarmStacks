@@ -21,22 +21,36 @@ final class LocalNotificationScheduler {
     func requestAuthorizationIfNeeded() async throws {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
-        if settings.authorizationStatus == .notDetermined {
+
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            // IMPORTANT: no `.criticalAlert` (needs entitlement, can cause false "not granted")
             let granted = try await center.requestAuthorization(
-                options: [.alert, .sound, .badge, .providesAppNotificationSettings, .criticalAlert]
+                options: [.alert, .sound, .badge, .providesAppNotificationSettings]
             )
             if !granted {
                 throw NSError(
                     domain: "AlarmStacks",
                     code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Notifications permission denied"]
+                    userInfo: [NSLocalizedDescriptionKey: "Notifications permission not granted"]
                 )
             }
+        case .denied:
+            // Surface denial so callers can decide to show an explainer or a Settings deep link.
+            throw NSError(
+                domain: "AlarmStacks",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Notifications are denied in Settings."]
+            )
+        default:
+            break
         }
     }
 
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
-        try await requestAuthorizationIfNeeded()
+        // Try to ensure permission. If denied, we'll still attempt to schedule (some systems
+        // allow scheduling but won't deliver). Callers should re-schedule after user changes settings.
+        _ = try? await requestAuthorizationIfNeeded()
 
         let center = UNUserNotificationCenter.current()
         await cancelAll(for: stack)
@@ -125,11 +139,19 @@ final class LocalNotificationScheduler {
         switch step.kind {
         case .fixedTime:
             if let h = step.hour, let m = step.minute {
-                return String(format: "Scheduled for %02d:%02d", h, m)
+                // Include weekday summary if present, to help debugging delivery expectations.
+                let days = daysText(for: step)
+                return days.isEmpty ? String(format: "Scheduled for %02d:%02d", h, m)
+                                    : String(format: "Scheduled %02d:%02d • %@", h, m, days)
             }
             return "Scheduled"
         case .timer:
-            if let s = step.durationSeconds { return "Timer \(format(seconds: s))" }
+            if let s = step.durationSeconds {
+                if let n = step.everyNDays, n > 1 {
+                    return "Timer \(format(seconds: s)) • every \(n) days"
+                }
+                return "Timer \(format(seconds: s))"
+            }
             return "Timer"
         case .relativeToPrev:
             if let s = step.offsetSeconds { return "Starts \(formatOffset(seconds: s)) after previous" }
@@ -164,5 +186,23 @@ final class LocalNotificationScheduler {
 
     private func formatOffset(seconds: Int) -> String {
         seconds >= 0 ? "+\(format(seconds: seconds))" : "−\(format(seconds: -seconds))"
+    }
+
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty {
+            chosen = arr
+        } else if let one = step.weekday {
+            chosen = [one]
+        } else {
+            return ""
+        }
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
     }
 }
