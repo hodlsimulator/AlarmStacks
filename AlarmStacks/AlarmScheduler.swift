@@ -103,8 +103,8 @@ final class UserNotificationScheduler: AlarmScheduling {
     }
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
-        for stack in stacks where stack.isArmed {
-            do { _ = try await schedule(stack: stack, calendar: calendar) }
+        for s in stacks where s.isArmed {
+            do { _ = try await schedule(stack: s, calendar: calendar) }
             catch { /* optionally log */ }
         }
     }
@@ -125,7 +125,7 @@ final class UserNotificationScheduler: AlarmScheduling {
         content.userInfo = [
             "stackID": stackID,
             "stepID": step.id.uuidString,
-            "snoozeMinutes": step.snoozeMinutes,
+            "snoozeMinutes": step.effectiveSnoozeMinutes, // ← use effective snooze
             "allowSnooze": step.allowSnooze
         ]
 

@@ -169,4 +169,11 @@ extension Step {
             }
         }
     }
+
+    /// Kept for clarity; currently equals `snoozeMinutes`.
+    /// Annotated @MainActor so accessing Settings in future remains safe.
+    @MainActor
+    var effectiveSnoozeMinutes: Int {
+        snoozeMinutes
+    }
 }

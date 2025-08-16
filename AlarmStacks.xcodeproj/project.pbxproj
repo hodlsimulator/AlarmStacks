@@ -64,7 +64,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
-				Untitled.swift,
 			);
 			target = E125507D2E50108B009BE32A /* AlarmStacks */;
 		};

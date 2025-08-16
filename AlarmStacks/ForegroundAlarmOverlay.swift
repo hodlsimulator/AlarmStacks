@@ -24,6 +24,7 @@ struct ForegroundAlarmOverlay: ViewModifier {
                     .zIndex(999)
             }
         }
+        // NOTE: Removed global .tint to prevent overriding destructive (Delete) red.
         .onAppear { controller.startObserversIfNeeded() }
         .animation(.spring(), value: controller.alertingAlarm?.id)
         #else
@@ -62,6 +63,8 @@ struct ForegroundAlarmOverlay: ViewModifier {
             .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .padding()
         }
+        // Apply the blue accent only to the overlay controls, not the whole app.
+        .tint(Color(hex: "#0A84FF"))
         .accessibilityElement(children: .contain)
         .accessibilityHint("Controls for the currently ringing alarm.")
     }
