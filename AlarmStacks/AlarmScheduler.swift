@@ -32,14 +32,15 @@ final class UserNotificationScheduler: AlarmScheduling {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         if settings.authorizationStatus == .notDetermined {
-            // Removed deprecated `.announcement`
             let granted = try await center.requestAuthorization(
                 options: [.alert, .sound, .badge, .providesAppNotificationSettings, .criticalAlert]
             )
             if !granted {
-                throw NSError(domain: "AlarmStacks",
-                              code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "Notifications permission denied"])
+                throw NSError(
+                    domain: "AlarmStacks",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Notifications permission denied"]
+                )
             }
         }
     }
@@ -66,7 +67,11 @@ final class UserNotificationScheduler: AlarmScheduling {
             }
 
             let id = notificationID(stackID: stack.id, stepID: step.id, index: index)
-            let content = buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString)
+            let content = buildContent(
+                for: step,
+                stackName: stack.name,
+                stackID: stack.id.uuidString
+            )
 
             let trigger: UNNotificationTrigger
             if step.kind == .fixedTime || step.kind == .relativeToPrev {
@@ -114,6 +119,16 @@ final class UserNotificationScheduler: AlarmScheduling {
         content.sound = .default
         content.interruptionLevel = .timeSensitive
         content.threadIdentifier = "stack-\(stackID)"
+
+        // Add actions (Stop/Snooze) support.
+        content.categoryIdentifier = "ALARM_CATEGORY" // matches the category you register in app start-up
+        content.userInfo = [
+            "stackID": stackID,
+            "stepID": step.id.uuidString,
+            "snoozeMinutes": step.snoozeMinutes,
+            "allowSnooze": step.allowSnooze
+        ]
+
         return content
     }
 

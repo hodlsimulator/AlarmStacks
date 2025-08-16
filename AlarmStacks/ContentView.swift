@@ -8,8 +8,6 @@
 import SwiftUI
 import SwiftData
 
-// MARK: - Library
-
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
@@ -19,43 +17,52 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Debug") {
+                    Button("Timer 10s (AlarmKit → UN fallback)") {
+                        Task {
+                            let s = Stack(name: "Quick Timer",
+                                          steps: [Step(title: "10s Timer",
+                                                       kind: .timer,
+                                                       order: 0,
+                                                       durationSeconds: 10)])
+                            _ = try? await AlarmScheduler.shared.schedule(stack: s)
+                        }
+                    }
+                }
+
                 if stacks.isEmpty {
                     EmptyState(addAction: addSampleStacks)
                         .listRowBackground(Color.clear)
                 } else {
                     ForEach(stacks) { stack in
-                        NavigationLink(value: stack) {
-                            StackRow(stack: stack)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) {
-                                delete(stack: stack)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
+                        NavigationLink(value: stack) { StackRow(stack: stack) }
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) { delete(stack: stack) } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
                             }
-                        }
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            Button {
-                                Task { await toggleArm(for: stack) }
-                            } label: {
-                                Label(stack.isArmed ? "Disarm" : "Arm",
-                                      systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
+                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                                Button { Task { await toggleArm(for: stack) } } label: {
+                                    Label(stack.isArmed ? "Disarm" : "Arm",
+                                          systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
+                                }
+                                .tint(stack.isArmed ? .orange : .green)
                             }
-                            .tint(stack.isArmed ? .orange : .green)
-                        }
                     }
                 }
             }
-            .listStyle(.plain)
+            .listStyle(.insetGrouped)
             .navigationTitle("Alarm Stacks")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { EditButton() }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showingAddStack = true
+                ToolbarItem(placement: .topBarLeading) {
+                    NavigationLink {
+                        AlarmDiagnosticsView()
                     } label: {
-                        Label("Add", systemImage: "plus")
+                        Label("Diagnostics", systemImage: "wrench.and.screwdriver")
                     }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingAddStack = true } label: { Label("Add Step", systemImage: "plus") }
                 }
             }
             .navigationDestination(for: Stack.self) { stack in
@@ -67,7 +74,7 @@ struct ContentView: View {
                 modelContext.insert(newStack)
                 try? modelContext.save()
             }
-            .presentationDetents([.medium, .large])
+            .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
     }
 
@@ -78,9 +85,12 @@ struct ContentView: View {
             await AlarmScheduler.shared.cancelAll(for: stack)
             stack.isArmed = false
         } else {
-            do { _ = try await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)
+            do {
+                _ = try await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)
                 stack.isArmed = true
-            } catch { stack.isArmed = false }
+            } catch {
+                stack.isArmed = false
+            }
         }
         try? modelContext.save()
     }
@@ -121,6 +131,8 @@ struct ContentView: View {
         return s
     }
 }
+
+// …(StackRow / StepChip / StackDetailView / AddStackSheet / AddStepSheet / EmptyState unchanged)
 
 // MARK: - Row
 
@@ -244,6 +256,10 @@ private struct StackDetailView: View {
         }
         .navigationTitle(stack.name)
         .toolbar {
+            // ← NEW: quick test menu also visible in detail
+            ToolbarItem(placement: .topBarLeading) {
+                DebugQuickAlarmButton()
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingAddSheet = true } label: {
                     Label("Add Step", systemImage: "plus")
@@ -252,7 +268,7 @@ private struct StackDetailView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             AddStepSheet(stack: stack)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
     }
 }
@@ -302,16 +318,16 @@ private struct StepRow: View {
 
 // MARK: - Add Stack / Step
 
+/// Sheet used when creating a *new* stack. Defaults the fixed-time pickers to the current time.
 private struct AddStackSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String = ""
     var onCreate: (Stack) -> Void
 
-    // Optional: immediately add a first step
     @State private var addFirstStep = true
     @State private var firstStepKind: StepKind = .fixedTime
-    @State private var hour: Int = 7
-    @State private var minute: Int = 0
+    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
+    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
     @State private var minutesAmount: Int = 10
 
     var body: some View {
@@ -341,9 +357,7 @@ private struct AddStackSheet: View {
             }
             .navigationTitle("New Stack")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
                         let s = Stack(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled" : name)
@@ -390,8 +404,8 @@ private struct AddStepSheet: View {
 
     @State private var title: String = ""
     @State private var kind: StepKind = .fixedTime
-    @State private var hour: Int = 6
-    @State private var minute: Int = 30
+    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
+    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
     @State private var minutesAmount: Int = 10
 
     var body: some View {
@@ -455,8 +469,7 @@ private struct EmptyState: View {
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "alarm.fill").font(.largeTitle)
-            Text("No stacks yet")
-                .font(.headline)
+            Text("No stacks yet").font(.headline)
             Text("Create a stack or add sample ones to get started.")
                 .foregroundStyle(.secondary)
             HStack {
@@ -469,3 +482,4 @@ private struct EmptyState: View {
         .padding(.vertical, 24)
     }
 }
+        
