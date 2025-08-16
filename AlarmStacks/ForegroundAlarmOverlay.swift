@@ -26,6 +26,7 @@ struct ForegroundAlarmOverlay: ViewModifier {
         }
         // NOTE: Removed global .tint to prevent overriding destructive (Delete) red.
         .onAppear { controller.startObserversIfNeeded() }
+        .onDisappear { controller.cancelObservers() }
         .animation(.spring(), value: controller.alertingAlarm?.id)
         #else
         content
@@ -35,6 +36,8 @@ struct ForegroundAlarmOverlay: ViewModifier {
     #if canImport(AlarmKit)
     @ViewBuilder
     private func overlay(for alarm: Alarm) -> some View {
+        let snoozeMinutes = controller.snoozeMinutes(forID: alarm.id)
+
         VStack {
             Spacer(minLength: 0)
             HStack(spacing: 12) {
@@ -54,7 +57,10 @@ struct ForegroundAlarmOverlay: ViewModifier {
                     Button {
                         AlarmController.shared.snooze(alarm.id)
                     } label: {
-                        Label("Snooze", systemImage: "zzz").font(.title3.bold())
+                        Label(
+                            snoozeMinutes.map { "Snooze (\($0)m)" } ?? "Snooze",
+                            systemImage: "zzz"
+                        ).font(.title3.bold())
                     }
                     .buttonStyle(.bordered)
                 }

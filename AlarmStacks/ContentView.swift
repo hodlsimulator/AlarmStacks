@@ -7,6 +7,10 @@
 
 import SwiftUI
 import SwiftData
+import UserNotifications
+#if canImport(AlarmKit)
+import AlarmKit
+#endif
 
 // Wrapper so we can use `.sheet(item:)` for export
 private struct ShareItem: Identifiable {
@@ -23,6 +27,10 @@ struct ContentView: View {
     @State private var showingAddStack = false
     @State private var showingSettings = false
     @State private var shareItem: ShareItem?
+
+    // Permissions explainer
+    @State private var showPermissionHelp = false
+    @State private var deniedPermissionKind: PermissionKind = .notifications
 
     var body: some View {
         NavigationStack {
@@ -108,9 +116,14 @@ struct ContentView: View {
         // Auto-reschedule when app becomes active or time changes
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                // Start AK observers and re-check permissions on foreground.
+                AlarmController.shared.startObserversIfNeeded()
                 Task {
+                    await checkPermissions()
                     await AlarmScheduler.shared.rescheduleAll(stacks: stacks.filter { $0.isArmed }, calendar: .current)
                 }
+            } else if phase == .background {
+                AlarmController.shared.cancelObservers()
             }
         }
         .task {
@@ -130,6 +143,34 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) {
             SettingsView()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+        }
+        // Permissions explainer
+        .sheet(isPresented: $showPermissionHelp) {
+            PermissionExplainerView(kind: deniedPermissionKind)
+                .presentationDetents([.medium, .large])
+        }
+        // Kick off an initial permissions check on first appearance.
+        .task {
+            await checkPermissions()
+        }
+    }
+
+    // MARK: - Permissions
+
+    private func checkPermissions() async {
+        #if canImport(AlarmKit)
+        let akState = AlarmManager.shared.authorizationState
+        if akState == .denied {
+            deniedPermissionKind = .alarmkit
+            showPermissionHelp = true
+            return
+        }
+        #endif
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        if settings.authorizationStatus == .denied {
+            deniedPermissionKind = .notifications
+            showPermissionHelp = true
         }
     }
 

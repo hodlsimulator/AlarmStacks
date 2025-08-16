@@ -11,7 +11,7 @@ typealias AlarmStack = Stack
 typealias AlarmStep  = Step
 
 #if canImport(AlarmKit)
-typealias AlarmScheduler = AlarmKitScheduler   // to be implemented when you pull in AlarmKit
+typealias AlarmScheduler = AppAlarmKitScheduler
 #else
-typealias AlarmScheduler = UserNotificationScheduler
+typealias AlarmScheduler = LocalNotificationScheduler
 #endif

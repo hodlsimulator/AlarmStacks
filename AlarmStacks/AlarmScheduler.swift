@@ -11,20 +11,10 @@ import SwiftData
 
 /// Runs on the main actor to avoid sending non-Sendable SwiftData models across threads (Swift 6 rules).
 @MainActor
-protocol AlarmScheduling {
-    func requestAuthorizationIfNeeded() async throws
-    func schedule(stack: Stack, calendar: Calendar) async throws -> [String] // returns identifiers
-    func cancelAll(for stack: Stack) async
-    func rescheduleAll(stacks: [Stack], calendar: Calendar) async
-}
+final class LocalNotificationScheduler {
 
-// MARK: - UserNotificationScheduler
-
-@MainActor
-final class UserNotificationScheduler: AlarmScheduling {
-
-    /// Convenience singleton so older code can call `AlarmScheduler.shared`.
-    static let shared = UserNotificationScheduler()
+    /// Convenience singleton so older code can call `AlarmScheduler.shared` via the alias.
+    static let shared = LocalNotificationScheduler()
 
     init() {}
 
@@ -52,8 +42,7 @@ final class UserNotificationScheduler: AlarmScheduling {
         await cancelAll(for: stack)
 
         var identifiers: [String] = []
-        let base = Date()
-        var lastFireDate: Date = base
+        var lastFireDate: Date = Date()
 
         for (index, step) in stack.sortedSteps.enumerated() where step.isEnabled {
             let fireDate: Date
@@ -120,12 +109,12 @@ final class UserNotificationScheduler: AlarmScheduling {
         content.interruptionLevel = .timeSensitive
         content.threadIdentifier = "stack-\(stackID)"
 
-        // Add actions (Stop/Snooze) support.
-        content.categoryIdentifier = "ALARM_CATEGORY" // matches the category you register in app start-up
+        // Add actions (Stop/Snooze) support (matches registration in app start-up).
+        content.categoryIdentifier = "ALARM_CATEGORY"
         content.userInfo = [
             "stackID": stackID,
             "stepID": step.id.uuidString,
-            "snoozeMinutes": step.effectiveSnoozeMinutes, // ← use effective snooze
+            "snoozeMinutes": step.effectiveSnoozeMinutes, // per-step
             "allowSnooze": step.allowSnooze
         ]
 

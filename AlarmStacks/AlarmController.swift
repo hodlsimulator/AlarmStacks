@@ -19,6 +19,9 @@ final class AlarmController: ObservableObject {
     @Published private(set) var alertingAlarm: Alarm?
     @Published private(set) var lastSnapshot: [Alarm] = []
     private let manager = AlarmManager.shared
+
+    /// Store the observer task so we can cancel on background and avoid duplicate streams.
+    private var observerTask: Task<Void, Never>?
     #endif
 
     private var observersStarted = false
@@ -42,9 +45,9 @@ final class AlarmController: ObservableObject {
     // MARK: - Observe AlarmKit state
     func startObserversIfNeeded() {
         #if canImport(AlarmKit)
-        guard !observersStarted else { return }
+        guard observerTask == nil else { return }
         observersStarted = true
-        Task { [weak self] in
+        observerTask = Task { [weak self] in
             guard let self else { return }
             for await snapshot in manager.alarmUpdates {
                 await MainActor.run {
@@ -53,6 +56,14 @@ final class AlarmController: ObservableObject {
                 }
             }
         }
+        #endif
+    }
+
+    func cancelObservers() {
+        #if canImport(AlarmKit)
+        observerTask?.cancel()
+        observerTask = nil
+        observersStarted = false
         #endif
     }
 
@@ -65,7 +76,18 @@ final class AlarmController: ObservableObject {
 
     func snooze(_ id: UUID) {
         #if canImport(AlarmKit)
+        // If AlarmKit supports duration-based countdowns in your build, call that overload here.
+        // Otherwise we trigger the default AK countdown. The UN fallback path already uses per-step minutes.
         try? manager.countdown(id: id)
+        #endif
+    }
+
+    /// Returns the per-step snooze minutes stored when scheduling via AlarmKit (if any).
+    func snoozeMinutes(forID id: UUID) -> Int? {
+        #if canImport(AlarmKit)
+        return AlarmKitSnoozeMap.minutes(for: id)
+        #else
+        return nil
         #endif
     }
 }
