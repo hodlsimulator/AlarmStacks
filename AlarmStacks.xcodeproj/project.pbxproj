@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		E12550C52E501624009BE32A /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E12550C42E501624009BE32A /* WidgetKit.framework */; };
+		E12550C72E501624009BE32A /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E12550C62E501624009BE32A /* SwiftUI.framework */; };
+		E12550D22E501626009BE32A /* AlarmStacksWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		E125508E2E50109B009BE32A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -21,17 +27,61 @@
 			remoteGlobalIDString = E125507D2E50108B009BE32A;
 			remoteInfo = AlarmStacks;
 		};
+		E12550D02E501626009BE32A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = E12550762E50108B009BE32A /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E12550C12E501624009BE32A;
+			remoteInfo = AlarmStacksWidgetExtension;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		E12550D72E501626009BE32A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				E12550D22E501626009BE32A /* AlarmStacksWidgetExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		E125507E2E50108B009BE32A /* AlarmStacks.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AlarmStacks.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		E125508D2E50109B009BE32A /* AlarmStacksTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlarmStacksTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		E12550972E50109B009BE32A /* AlarmStacksUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AlarmStacksUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AlarmStacksWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		E12550C42E501624009BE32A /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		E12550C62E501624009BE32A /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E12550BD2E501313009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacks" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E125507D2E50108B009BE32A /* AlarmStacks */;
+		};
+		E12550D62E501626009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacksWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		E12550802E50108B009BE32A /* AlarmStacks */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E12550BD2E501313009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacks" target */,
+			);
 			path = AlarmStacks;
 			sourceTree = "<group>";
 		};
@@ -43,6 +93,14 @@
 		E125509A2E50109B009BE32A /* AlarmStacksUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = AlarmStacksUITests;
+			sourceTree = "<group>";
+		};
+		E12550C82E501624009BE32A /* AlarmStacksWidget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E12550D62E501626009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacksWidgetExtension" target */,
+			);
+			path = AlarmStacksWidget;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -69,6 +127,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E12550BF2E501624009BE32A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E12550C72E501624009BE32A /* SwiftUI.framework in Frameworks */,
+				E12550C52E501624009BE32A /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -78,6 +145,8 @@
 				E12550802E50108B009BE32A /* AlarmStacks */,
 				E12550902E50109B009BE32A /* AlarmStacksTests */,
 				E125509A2E50109B009BE32A /* AlarmStacksUITests */,
+				E12550C82E501624009BE32A /* AlarmStacksWidget */,
+				E12550C32E501624009BE32A /* Frameworks */,
 				E125507F2E50108B009BE32A /* Products */,
 			);
 			sourceTree = "<group>";
@@ -88,8 +157,18 @@
 				E125507E2E50108B009BE32A /* AlarmStacks.app */,
 				E125508D2E50109B009BE32A /* AlarmStacksTests.xctest */,
 				E12550972E50109B009BE32A /* AlarmStacksUITests.xctest */,
+				E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		E12550C32E501624009BE32A /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				E12550C42E501624009BE32A /* WidgetKit.framework */,
+				E12550C62E501624009BE32A /* SwiftUI.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -102,10 +181,12 @@
 				E125507A2E50108B009BE32A /* Sources */,
 				E125507B2E50108B009BE32A /* Frameworks */,
 				E125507C2E50108B009BE32A /* Resources */,
+				E12550D72E501626009BE32A /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				E12550D12E501626009BE32A /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				E12550802E50108B009BE32A /* AlarmStacks */,
@@ -163,6 +244,28 @@
 			productReference = E12550972E50109B009BE32A /* AlarmStacksUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E12550D32E501626009BE32A /* Build configuration list for PBXNativeTarget "AlarmStacksWidgetExtension" */;
+			buildPhases = (
+				E12550BE2E501624009BE32A /* Sources */,
+				E12550BF2E501624009BE32A /* Frameworks */,
+				E12550C02E501624009BE32A /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				E12550C82E501624009BE32A /* AlarmStacksWidget */,
+			);
+			name = AlarmStacksWidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = AlarmStacksWidgetExtension;
+			productReference = E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -184,6 +287,9 @@
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = E125507D2E50108B009BE32A;
 					};
+					E12550C12E501624009BE32A = {
+						CreatedOnToolsVersion = 26.0;
+					};
 				};
 			};
 			buildConfigurationList = E12550792E50108B009BE32A /* Build configuration list for PBXProject "AlarmStacks" */;
@@ -203,6 +309,7 @@
 				E125507D2E50108B009BE32A /* AlarmStacks */,
 				E125508C2E50109B009BE32A /* AlarmStacksTests */,
 				E12550962E50109B009BE32A /* AlarmStacksUITests */,
+				E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -223,6 +330,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		E12550952E50109B009BE32A /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E12550C02E501624009BE32A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -253,6 +367,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		E12550BE2E501624009BE32A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -265,6 +386,11 @@
 			isa = PBXTargetDependency;
 			target = E125507D2E50108B009BE32A /* AlarmStacks */;
 			targetProxy = E12550982E50109B009BE32A /* PBXContainerItemProxy */;
+		};
+		E12550D12E501626009BE32A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
+			targetProxy = E12550D02E501626009BE32A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -400,6 +526,7 @@
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AlarmStacks/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +559,7 @@
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AlarmStacks/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -538,6 +666,66 @@
 			};
 			name = Release;
 		};
+		E12550D42E501626009BE32A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 92HEPEJ42Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AlarmStacksWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = AlarmStacksWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hodlsimulator.AlarmStacks.AlarmStacksWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		E12550D52E501626009BE32A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 92HEPEJ42Z;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AlarmStacksWidget/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = AlarmStacksWidget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.hodlsimulator.AlarmStacks.AlarmStacksWidget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -573,6 +761,15 @@
 			buildConfigurations = (
 				E12550A82E50109B009BE32A /* Debug */,
 				E12550A92E50109B009BE32A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E12550D32E501626009BE32A /* Build configuration list for PBXNativeTarget "AlarmStacksWidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E12550D42E501626009BE32A /* Debug */,
+				E12550D52E501626009BE32A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
