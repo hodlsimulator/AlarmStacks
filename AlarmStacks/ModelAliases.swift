@@ -7,7 +7,11 @@
 
 import Foundation
 
-// Keep legacy names working with the new models/scheduler.
 typealias AlarmStack = Stack
-typealias AlarmStep = Step
+typealias AlarmStep  = Step
+
+#if canImport(AlarmKit)
+typealias AlarmScheduler = AlarmKitScheduler   // to be implemented when you pull in AlarmKit
+#else
 typealias AlarmScheduler = UserNotificationScheduler
+#endif
