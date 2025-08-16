@@ -17,19 +17,6 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Debug") {
-                    Button("Timer 10s (AlarmKit → UN fallback)") {
-                        Task {
-                            let s = Stack(name: "Quick Timer",
-                                          steps: [Step(title: "10s Timer",
-                                                       kind: .timer,
-                                                       order: 0,
-                                                       durationSeconds: 10)])
-                            _ = try? await AlarmScheduler.shared.schedule(stack: s)
-                        }
-                    }
-                }
-
                 if stacks.isEmpty {
                     EmptyState(addAction: addSampleStacks)
                         .listRowBackground(Color.clear)
@@ -54,15 +41,10 @@ struct ContentView: View {
             .listStyle(.insetGrouped)
             .navigationTitle("Alarm Stacks")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    NavigationLink {
-                        AlarmDiagnosticsView()
-                    } label: {
-                        Label("Diagnostics", systemImage: "wrench.and.screwdriver")
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingAddStack = true } label: { Label("Add Step", systemImage: "plus") }
+                    Button { showingAddStack = true } label: {
+                        Label("Add Step", systemImage: "plus")
+                    }
                 }
             }
             .navigationDestination(for: Stack.self) { stack in
@@ -132,8 +114,6 @@ struct ContentView: View {
     }
 }
 
-// …(StackRow / StepChip / StackDetailView / AddStackSheet / AddStepSheet / EmptyState unchanged)
-
 // MARK: - Row
 
 private struct StackRow: View {
@@ -154,7 +134,6 @@ private struct StackRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            // Horizontal “pill” chips for each step
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(stack.sortedSteps) { step in
@@ -233,7 +212,7 @@ private struct StackDetailView: View {
                 Toggle(isOn: Binding(get: { stack.isArmed }, set: { newVal in
                     Task {
                         if newVal {
-                            do { _ = try await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar) } catch {}
+                            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
                         } else {
                             await AlarmScheduler.shared.cancelAll(for: stack)
                         }
@@ -256,10 +235,6 @@ private struct StackDetailView: View {
         }
         .navigationTitle(stack.name)
         .toolbar {
-            // ← NEW: quick test menu also visible in detail
-            ToolbarItem(placement: .topBarLeading) {
-                DebugQuickAlarmButton()
-            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { showingAddSheet = true } label: {
                     Label("Add Step", systemImage: "plus")
@@ -284,15 +259,11 @@ private struct StepRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            if step.isEnabled {
-                Image(systemName: "checkmark.circle.fill")
-            } else {
-                Image(systemName: "xmark.circle")
-            }
+            Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
 
-    private func detailText(for: Step) -> String {
+    private func detailText(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
             if let h = step.hour, let m = step.minute { return String(format: "Fixed • %02d:%02d", h, m) }
@@ -318,7 +289,6 @@ private struct StepRow: View {
 
 // MARK: - Add Stack / Step
 
-/// Sheet used when creating a *new* stack. Defaults the fixed-time pickers to the current time.
 private struct AddStackSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String = ""
@@ -348,9 +318,7 @@ private struct AddStackSheet: View {
                             Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
                             Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
                         } else {
-                            Stepper(value: $minutesAmount, in: 1...240) {
-                                Text("\(minutesAmount) minutes")
-                            }
+                            Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
                         }
                     }
                 }
@@ -426,9 +394,7 @@ private struct AddStepSheet: View {
                     }
                 } else {
                     Section(kind == .timer ? "Duration" : "Offset") {
-                        Stepper(value: $minutesAmount, in: 1...240) {
-                            Text("\(minutesAmount) minutes")
-                        }
+                        Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
                     }
                 }
             }
@@ -482,4 +448,3 @@ private struct EmptyState: View {
         .padding(.vertical, 24)
     }
 }
-        
