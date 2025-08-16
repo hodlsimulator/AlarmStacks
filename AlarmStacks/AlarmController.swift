@@ -5,6 +5,13 @@
 //  Created by . . on 8/16/25.
 //
 
+//
+//  AlarmController.swift
+//  AlarmStacks
+//
+//  Created by . . on 8/16/25.
+//
+
 import SwiftUI
 import Combine
 #if canImport(AlarmKit)
@@ -19,9 +26,9 @@ final class AlarmController: ObservableObject {
     @Published private(set) var alertingAlarm: Alarm?
     @Published private(set) var lastSnapshot: [Alarm] = []
     private let manager = AlarmManager.shared
+    /// Store the observer Task so we can cancel it and avoid duplicate streams.
+    private var observerTask: Task<Void, Never>?
     #endif
-
-    private var observersStarted = false
 
     // MARK: - Authorisation
     func ensureAuthorised() async throws {
@@ -34,17 +41,14 @@ final class AlarmController: ObservableObject {
                           userInfo: [NSLocalizedDescriptionKey: "Alarm permission denied in Settings."])
         @unknown default: break
         }
-        #else
-        return
         #endif
     }
 
     // MARK: - Observe AlarmKit state
     func startObserversIfNeeded() {
         #if canImport(AlarmKit)
-        guard !observersStarted else { return }
-        observersStarted = true
-        Task { [weak self] in
+        guard observerTask == nil else { return }
+        observerTask = Task { [weak self] in
             guard let self else { return }
             for await snapshot in manager.alarmUpdates {
                 await MainActor.run {
@@ -53,6 +57,13 @@ final class AlarmController: ObservableObject {
                 }
             }
         }
+        #endif
+    }
+
+    func cancelObservers() {
+        #if canImport(AlarmKit)
+        observerTask?.cancel()
+        observerTask = nil
         #endif
     }
 
