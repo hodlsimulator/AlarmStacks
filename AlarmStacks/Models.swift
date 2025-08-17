@@ -11,9 +11,9 @@ import SwiftData
 // MARK: - StepKind
 
 enum StepKind: Int, Codable, CaseIterable, Sendable {
-    case fixedTime        // 06:30 (optionally weekdays)
-    case timer            // 25 minutes
-    case relativeToPrev   // +10 minutes after previous
+    case fixedTime        // e.g. 06:30 (optionally a weekday or multiple weekdays)
+    case timer            // e.g. 25 minutes
+    case relativeToPrev   // e.g. +10 minutes after previous step
 }
 
 // MARK: - Stack
@@ -44,6 +44,8 @@ final class Stack {
     }
 }
 
+// MARK: - Convenience
+
 extension Stack {
     var sortedSteps: [Step] {
         steps.sorted { a, b in
@@ -68,13 +70,13 @@ final class Step {
     var hour: Int?            // 0...23
     var minute: Int?          // 0...59
 
-    /// Legacy single weekday. If `weekdays` is non-empty, it takes precedence.
+    /// Legacy single weekday (kept for compatibility). If `weekdays` is set, it takes precedence.
     var weekday: Int?         // 1...7 (nil = any day / next occurrence)
 
-    /// Multiple weekdays. If non-empty, restrict fixed-time to these days (1...7; Sunday=1).
+    /// New: multiple weekdays. If non-empty, restrict fixed-time to these days (1...7; Sunday=1).
     var weekdays: [Int]?      // nil or [] = any day
 
-    // timer: duration in seconds
+    // timer: duration in seconds (+ optional cadence)
     var durationSeconds: Int?
 
     // relativeToPrev: offset (+/-) in seconds from the previous step time
@@ -84,6 +86,9 @@ final class Step {
     var soundName: String?
     var allowSnooze: Bool
     var snoozeMinutes: Int
+
+    /// For timers, optional cadence like “every N days”.
+    var everyNDays: Int?
 
     // Inverse inferred by SwiftData (Stack.steps <-> Step.stack)
     var stack: Stack?
@@ -104,6 +109,7 @@ final class Step {
         soundName: String? = nil,
         allowSnooze: Bool = true,
         snoozeMinutes: Int = 9,
+        everyNDays: Int? = nil,
         stack: Stack? = nil
     ) {
         self.id = id
@@ -121,6 +127,7 @@ final class Step {
         self.soundName = soundName
         self.allowSnooze = allowSnooze
         self.snoozeMinutes = snoozeMinutes
+        self.everyNDays = everyNDays
         self.stack = stack
     }
 }
@@ -134,14 +141,18 @@ enum SchedulingError: Error {
 extension Step {
     /// Returns the next wall-clock `Date` this step should fire at, based on `base`.
     /// - fixedTime: next occurrence of (weekdays? OR legacy weekday? OR any day) at hour:minute
-    /// - timer: base + duration
+    /// - timer: base + duration, then apply optional `everyNDays` gating
     /// - relativeToPrev: base + offset
     func nextFireDate(basedOn base: Date, calendar: Calendar = .current) throws -> Date {
         switch kind {
         case .timer:
             guard let seconds = durationSeconds, seconds > 0
             else { throw SchedulingError.invalidInputs }
-            return base.addingTimeInterval(TimeInterval(seconds))
+            let tentative = base.addingTimeInterval(TimeInterval(seconds))
+            if let n = everyNDays, n > 1 {
+                return alignToEveryNDays(from: base, candidate: tentative, n: n, calendar: calendar)
+            }
+            return tentative
 
         case .relativeToPrev:
             guard let delta = offsetSeconds
@@ -196,6 +207,22 @@ extension Step {
         }
     }
 
+    /// Align the candidate date forward to the next day that satisfies "every N days"
+    /// measured from the `base` day boundary, preserving the time-of-day.
+    private func alignToEveryNDays(from base: Date, candidate: Date, n: Int, calendar: Calendar) -> Date {
+        guard n > 1 else { return candidate }
+        let baseDay = calendar.startOfDay(for: base)
+        let candDay = calendar.startOfDay(for: candidate)
+        let deltaDays = calendar.dateComponents([.day], from: baseDay, to: candDay).day ?? 0
+        let mod = ((deltaDays % n) + n) % n
+        if mod == 0 { return candidate }
+        // Bump forward by the remaining days to land on the cadence.
+        return calendar.date(byAdding: .day, value: (n - mod), to: candidate) ?? candidate
+    }
+
+    /// Kept for clarity; currently equals `snoozeMinutes`.
     @MainActor
-    var effectiveSnoozeMinutes: Int { snoozeMinutes }
+    var effectiveSnoozeMinutes: Int {
+        snoozeMinutes
+    }
 }

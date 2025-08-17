@@ -2,7 +2,7 @@
 //  StepEditorView.swift
 //  AlarmStacks
 //
-//  Created by . . on 8/17/25.
+//  Created by . . on 8/16/25.
 //
 
 import SwiftUI
@@ -22,7 +22,6 @@ struct StepEditorView: View {
     @State private var allowSnooze: Bool = true
     @State private var snoozeMinutes: Int = 9
     @State private var enabled: Bool = true
-    @State private var soundName: String = ""
 
     // Weekday multi-select for fixed-time (1...7, Sun=1)
     @State private var weekdaySelection: Set<Int> = []
@@ -70,8 +69,6 @@ struct StepEditorView: View {
             Section("Behaviour") {
                 Toggle("Allow Snooze", isOn: $allowSnooze)
                 Stepper(value: $snoozeMinutes, in: 1...30) { Text("Snooze Minutes: \(snoozeMinutes)") }
-                TextField("Sound (optional)", text: $soundName)
-                    .textInputAutocapitalization(.never)
             }
         }
         .navigationTitle("Edit Step")
@@ -102,7 +99,6 @@ struct StepEditorView: View {
 
         allowSnooze = step.allowSnooze
         snoozeMinutes = step.snoozeMinutes
-        soundName = step.soundName ?? ""
 
         if let multi = step.weekdays, !multi.isEmpty {
             weekdaySelection = Set(multi)
@@ -148,7 +144,6 @@ struct StepEditorView: View {
 
         step.allowSnooze = allowSnooze
         step.snoozeMinutes = snoozeMinutes
-        step.soundName = soundName.isEmpty ? nil : soundName
 
         try? modelContext.save()
     }
@@ -161,7 +156,7 @@ struct StepEditorView: View {
     }
 }
 
-// MARK: - WeekdayPicker
+// MARK: - WeekdayPicker (chips)
 
 private struct WeekdayPicker: View {
     @Binding var selection: Set<Int> // 1...7 (Sun=1)

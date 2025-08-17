@@ -8,6 +8,12 @@
 import SwiftUI
 import SwiftData
 
+// Wrapper so we can use `.sheet(item:)` later if you add export again
+private struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
@@ -21,6 +27,20 @@ struct ContentView: View {
                     EmptyState(addAction: addSampleStacks)
                         .listRowBackground(Color.clear)
                 } else {
+                    // Global controls (safe, no scene watchers)
+                    Section {
+                        HStack {
+                            Button { armAll() } label: {
+                                Label("Arm All", systemImage: "bell.fill")
+                            }
+                            Spacer()
+                            Button { disarmAll() } label: {
+                                Label("Disarm All", systemImage: "bell.slash.fill")
+                            }
+                            .tint(.orange)
+                        }
+                    }
+
                     ForEach(stacks) { stack in
                         NavigationLink(value: stack) { StackRow(stack: stack) }
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
@@ -43,12 +63,16 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingAddStack = true } label: {
-                        Label("Add Step", systemImage: "plus")
+                        Label("Add Stack", systemImage: "plus")
                     }
                 }
             }
             .navigationDestination(for: Stack.self) { stack in
                 StackDetailView(stack: stack)
+            }
+            // NEW: edit a step
+            .navigationDestination(for: Step.self) { step in
+                StepEditorView(step: step)
             }
         }
         .sheet(isPresented: $showingAddStack) {
@@ -61,6 +85,26 @@ struct ContentView: View {
     }
 
     // MARK: - Actions
+
+    private func armAll() {
+        Task { @MainActor in
+            for s in stacks where !s.isArmed {
+                _ = try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)
+                s.isArmed = true
+            }
+            try? modelContext.save()
+        }
+    }
+
+    private func disarmAll() {
+        Task { @MainActor in
+            for s in stacks where s.isArmed {
+                await AlarmScheduler.shared.cancelAll(for: s)
+                s.isArmed = false
+            }
+            try? modelContext.save()
+        }
+    }
 
     private func toggleArm(for stack: Stack) async {
         if stack.isArmed {
@@ -137,7 +181,11 @@ private struct StackRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(stack.sortedSteps) { step in
-                        StepChip(step: step)
+                        // Tap a chip to edit that step
+                        NavigationLink(value: step) {
+                            StepChip(step: step)
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.vertical, 2)
@@ -174,10 +222,11 @@ private struct StepChip: View {
     private func label(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
-            if let h = step.hour, let m = step.minute {
-                return String(format: "%02d:%02d  %@", h, m, step.title)
-            }
-            return step.title
+            var time = "Time"
+            if let h = step.hour, let m = step.minute { time = String(format: "%02d:%02d", h, m) }
+            let days = daysText(for: step)
+            if days.isEmpty { return "\(time)  \(step.title)" }
+            return "\(time) • \(days)  \(step.title)"
         case .timer:
             if let s = step.durationSeconds { return "\(format(seconds: s))  \(step.title)" }
             return step.title
@@ -193,6 +242,24 @@ private struct StepChip: View {
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m" }
         return "\(seconds % 60)s"
+    }
+
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty {
+            chosen = arr
+        } else if let one = step.weekday {
+            chosen = [one]
+        } else {
+            return ""
+        }
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
     }
 }
 
@@ -223,7 +290,9 @@ private struct StackDetailView: View {
 
             Section("Steps") {
                 ForEach(stack.sortedSteps) { step in
-                    StepRow(step: step)
+                    NavigationLink(value: step) {
+                        StepRow(step: step)
+                    }
                 }
                 .onDelete { idx in
                     let snapshot = stack.sortedSteps
@@ -262,11 +331,13 @@ private struct StepRow: View {
         }
     }
 
-    private func detailText(for: Step) -> String {
+    private func detailText(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
-            if let h = step.hour, let m = step.minute { return String(format: "Fixed • %02d:%02d", h, m) }
-            return "Fixed"
+            var time = "Fixed"
+            if let h = step.hour, let m = step.minute { time = String(format: "Fixed • %02d:%02d", h, m) }
+            let days = daysText(for: step)
+            return days.isEmpty ? time : "\(time) • \(days)"
         case .timer:
             if let s = step.durationSeconds { return "Timer • \(format(seconds: s))" }
             return "Timer"
@@ -283,6 +354,24 @@ private struct StepRow: View {
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m \(s)s" }
         return "\(s)s"
+    }
+
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty {
+            chosen = arr
+        } else if let one = step.weekday {
+            chosen = [one]
+        } else {
+            return ""
+        }
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
     }
 }
 
