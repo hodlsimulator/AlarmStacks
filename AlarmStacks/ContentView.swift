@@ -405,7 +405,7 @@ private struct AddStepSheet: View {
                         addStep()
                         dismiss()
                     }
-                    .disabled(title.isEmpty)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -416,11 +416,24 @@ private struct AddStepSheet: View {
         let step: Step
         switch kind {
         case .fixedTime:
-            step = Step(title: title, kind: .fixedTime, order: order, hour: hour, minute: minute, stack: stack)
+            step = Step(title: title,
+                        kind: .fixedTime,
+                        order: order,
+                        hour: hour,
+                        minute: minute,
+                        stack: stack)
         case .timer:
-            step = Step(title: title, kind: .timer, order: order, durationSeconds: minutesAmount * 60, stack: stack)
+            step = Step(title: title,
+                        kind: .timer,
+                        order: order,
+                        durationSeconds: minutesAmount * 60,
+                        stack: stack)
         case .relativeToPrev:
-            step = Step(title: title, kind: .relativeToPrev, order: order, offsetSeconds: minutesAmount * 60, stack: stack)
+            step = Step(title: title,
+                        kind: .relativeToPrev,
+                        order: order,
+                        offsetSeconds: minutesAmount * 60,
+                        stack: stack)
         }
         stack.steps.append(step)
         try? modelContext.save()

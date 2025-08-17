@@ -11,9 +11,9 @@ import SwiftData
 // MARK: - StepKind
 
 enum StepKind: Int, Codable, CaseIterable, Sendable {
-    case fixedTime        // e.g. 06:30 (optionally a weekday)
-    case timer            // e.g. 25 minutes
-    case relativeToPrev   // e.g. +10 minutes after previous step
+    case fixedTime        // 06:30 (optionally weekdays)
+    case timer            // 25 minutes
+    case relativeToPrev   // +10 minutes after previous
 }
 
 // MARK: - Stack
@@ -32,7 +32,7 @@ final class Stack {
         name: String,
         isArmed: Bool = false,
         createdAt: Date = .now,
-        themeName: String = "LiquidGlass/Blue",
+        themeName: String = "Default",
         steps: [Step] = []
     ) {
         self.id = id
@@ -44,8 +44,6 @@ final class Stack {
     }
 }
 
-// MARK: - Convenience
-
 extension Stack {
     var sortedSteps: [Step] {
         steps.sorted { a, b in
@@ -53,9 +51,6 @@ extension Stack {
             return a.createdAt < b.createdAt
         }
     }
-
-    /// Free tier: 8 steps per stack (repo README).
-    var exceedsFreeTierLimits: Bool { sortedSteps.count > 8 }
 }
 
 // MARK: - Step
@@ -69,10 +64,15 @@ final class Step {
     var isEnabled: Bool
     var createdAt: Date
 
-    // fixedTime: hour/minute (24h). Optional weekday (1...7, Sunday = 1)
+    // fixedTime: hour/minute (24h). Repeat on specific weekdays (1...7, Sunday = 1).
     var hour: Int?            // 0...23
     var minute: Int?          // 0...59
+
+    /// Legacy single weekday. If `weekdays` is non-empty, it takes precedence.
     var weekday: Int?         // 1...7 (nil = any day / next occurrence)
+
+    /// Multiple weekdays. If non-empty, restrict fixed-time to these days (1...7; Sunday=1).
+    var weekdays: [Int]?      // nil or [] = any day
 
     // timer: duration in seconds
     var durationSeconds: Int?
@@ -98,6 +98,7 @@ final class Step {
         hour: Int? = nil,
         minute: Int? = nil,
         weekday: Int? = nil,
+        weekdays: [Int]? = nil,
         durationSeconds: Int? = nil,
         offsetSeconds: Int? = nil,
         soundName: String? = nil,
@@ -114,6 +115,7 @@ final class Step {
         self.hour = hour
         self.minute = minute
         self.weekday = weekday
+        self.weekdays = weekdays
         self.durationSeconds = durationSeconds
         self.offsetSeconds = offsetSeconds
         self.soundName = soundName
@@ -131,7 +133,7 @@ enum SchedulingError: Error {
 
 extension Step {
     /// Returns the next wall-clock `Date` this step should fire at, based on `base`.
-    /// - fixedTime: next occurrence of (weekday?, hour, minute)
+    /// - fixedTime: next occurrence of (weekdays? OR legacy weekday? OR any day) at hour:minute
     /// - timer: base + duration
     /// - relativeToPrev: base + offset
     func nextFireDate(basedOn base: Date, calendar: Calendar = .current) throws -> Date {
@@ -148,13 +150,35 @@ extension Step {
 
         case .fixedTime:
             guard let hour, let minute else { throw SchedulingError.invalidInputs }
-            var comps = DateComponents()
-            comps.hour = hour
-            comps.minute = minute
-
             let start = base
+
+            // If multi-weekday selection exists, find the earliest next among them.
+            if let days = weekdays?.filter({ (1...7).contains($0) }), !days.isEmpty {
+                var best: Date?
+                for d in days {
+                    var comps = DateComponents()
+                    comps.weekday = d
+                    comps.hour = hour
+                    comps.minute = minute
+                    if let next = calendar.nextDate(
+                        after: start,
+                        matching: comps,
+                        matchingPolicy: .nextTimePreservingSmallerComponents,
+                        direction: .forward
+                    ) {
+                        if best == nil || next < best! { best = next }
+                    }
+                }
+                if let best { return best }
+                throw SchedulingError.invalidInputs
+            }
+
+            // Legacy: single weekday
             if let weekday {
-                comps.weekday = weekday  // 1 = Sunday
+                var comps = DateComponents()
+                comps.weekday = weekday
+                comps.hour = hour
+                comps.minute = minute
                 if let next = calendar.nextDate(
                     after: start,
                     matching: comps,
@@ -162,11 +186,16 @@ extension Step {
                     direction: .forward
                 ) { return next }
                 throw SchedulingError.invalidInputs
-            } else {
-                // Today at hour:minute, or tomorrow if already passed
-                let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start)!
+            }
+
+            // No weekday constraints: today at hour:minute, or tomorrow if already passed
+            if let today = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start) {
                 return today > start ? today : calendar.date(byAdding: .day, value: 1, to: today)!
             }
+            throw SchedulingError.invalidInputs
         }
     }
+
+    @MainActor
+    var effectiveSnoozeMinutes: Int { snoozeMinutes }
 }
