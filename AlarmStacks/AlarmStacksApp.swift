@@ -72,6 +72,7 @@ struct AlarmStacksApp: App {
             ContentView()
                 .alarmStopOverlay() // in-app Stop/Snooze when AlarmKit UI isn't present
                 .background(ForegroundRearmCoordinator()) // re-arm after returning from Settings
+                .preferredAppearance()
                 .task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
         }
         .modelContainer(for: [Stack.self, Step.self])
