@@ -23,11 +23,12 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
 
     // MARK: Tunables
-    /// Give AlarmKit a bit more breathing room on the very first schedule after install.
+    /// First-install safety margin (helps the very first scheduled alarm).
+    private static let minLeadSecondsFirst  = 35
+    /// Normal margin for subsequent schedules.
     private static let minLeadSecondsNormal = 12
-    private static let minLeadSecondsFirst  = 20
 
-    /// Tracks whether we have ever successfully scheduled with AlarmKit on this install.
+    /// Tracks whether we have scheduled with AK at least once on this install.
     private var hasScheduledOnceAK: Bool {
         get { defaults.bool(forKey: "ak.hasScheduledOnce") }
         set { defaults.set(newValue, forKey: "ak.hasScheduledOnce") }
@@ -73,7 +74,6 @@ final class AlarmKitScheduler: AlarmScheduling {
         let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
 
         for step in stack.sortedSteps where step.isEnabled {
-            // Compute the target time
             let fireDate: Date
             switch step.kind {
             case .fixedTime:
@@ -84,7 +84,7 @@ final class AlarmKitScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
-            // Build alert/attributes
+            // Attributes
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
@@ -103,16 +103,13 @@ final class AlarmKitScheduler: AlarmScheduling {
                 akIDs.append(id)
 
             } catch {
-                // Roll back anything we placed with AK, then UN fallback for the whole stack.
                 for u in akIDs { try? manager.cancel(id: u) }
                 return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
             }
         }
 
-        // Mark that we've scheduled with AK at least once.
         if firstRun { hasScheduledOnceAK = true }
 
-        // Start/refresh Live Activity & widget
         await LiveActivityManager.start(for: stack, calendar: calendar)
 
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
@@ -123,7 +120,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         let key = storageKey(for: stack)
         for s in (defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) { try? manager.cancel(id: id) }
-            // Cleanup old backup notifications if any still exist from prior builds.
+            // Clean any legacy shadow requests if present from older builds.
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])
             center.removeDeliveredNotifications(withIdentifiers: ["shadow-\(s)"])

@@ -63,18 +63,21 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
-        NotificationCategories.register()                    // UN actions/categories
+        // UN actions/categories for the fallback path and snooze/stop actions.
+        NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
+
+        // ✅ PRIME AlarmKit authorisation at app launch to avoid a first-run race.
+        Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .alarmStopOverlay()                          // in-app Stop/Snooze if AlarmKit UI isn’t visible
-                .background(ForegroundRearmCoordinator())    // re-arm after returning from Settings
-                .preferredAppearance()                       // Light/Dark/System
-                .onOpenURL { DeepLinks.handle($0) }          // deep links from Live Activity
-                .task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
+                .alarmStopOverlay()                        // in-app Stop/Snooze if AK UI isn’t visible
+                .background(ForegroundRearmCoordinator())  // re-arm after returning from Settings
+                .preferredAppearance()                     // Light/Dark/System
+                .onOpenURL { DeepLinks.handle($0) }        // deep links from Live Activity
         }
         .modelContainer(for: [Stack.self, Step.self])
     }
