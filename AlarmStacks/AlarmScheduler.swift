@@ -26,36 +26,48 @@ final class UserNotificationScheduler: AlarmScheduling {
     /// Convenience singleton so older code can call `AlarmScheduler.shared`.
     static let shared = UserNotificationScheduler()
 
-    init() {}
+    private init() {}
 
     func requestAuthorizationIfNeeded() async throws {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
-        if settings.authorizationStatus == .notDetermined {
+
+        switch settings.authorizationStatus {
+        case .notDetermined:
+            // Do NOT request .criticalAlert unless you have the entitlement.
             let granted = try await center.requestAuthorization(
-                options: [.alert, .sound, .badge, .providesAppNotificationSettings, .criticalAlert]
+                options: [.alert, .sound, .badge, .providesAppNotificationSettings]
             )
             if !granted {
                 throw NSError(
                     domain: "AlarmStacks",
                     code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "Notifications permission denied"]
+                    userInfo: [NSLocalizedDescriptionKey: "Notifications permission not granted"]
                 )
             }
+        case .denied:
+            throw NSError(
+                domain: "AlarmStacks",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "Notifications are denied in Settings."]
+            )
+        default:
+            break
         }
     }
 
+    @discardableResult
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
-        try await requestAuthorizationIfNeeded()
+        _ = try? await requestAuthorizationIfNeeded()
 
         let center = UNUserNotificationCenter.current()
         await cancelAll(for: stack)
 
         var identifiers: [String] = []
-        let base = Date()
-        var lastFireDate: Date = base
+        var lastFireDate: Date = Date()
 
         for (index, step) in stack.sortedSteps.enumerated() where step.isEnabled {
+            // Compute fire date
             let fireDate: Date
             switch step.kind {
             case .fixedTime:
@@ -66,13 +78,11 @@ final class UserNotificationScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
+            // Build content (per-step snooze overrides Settings)
             let id = notificationID(stackID: stack.id, stepID: step.id, index: index)
-            let content = buildContent(
-                for: step,
-                stackName: stack.name,
-                stackID: stack.id.uuidString
-            )
+            let content = buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString)
 
+            // Trigger
             let trigger: UNNotificationTrigger
             if step.kind == .fixedTime || step.kind == .relativeToPrev {
                 let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second],
@@ -104,8 +114,7 @@ final class UserNotificationScheduler: AlarmScheduling {
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
         for stack in stacks where stack.isArmed {
-            do { _ = try await schedule(stack: stack, calendar: calendar) }
-            catch { /* optionally log */ }
+            _ = try? await schedule(stack: stack, calendar: calendar)
         }
     }
 
@@ -125,7 +134,7 @@ final class UserNotificationScheduler: AlarmScheduling {
         content.userInfo = [
             "stackID": stackID,
             "stepID": step.id.uuidString,
-            "snoozeMinutes": step.snoozeMinutes,
+            "snoozeMinutes": step.snoozeMinutes, // per-step wins
             "allowSnooze": step.allowSnooze
         ]
 
