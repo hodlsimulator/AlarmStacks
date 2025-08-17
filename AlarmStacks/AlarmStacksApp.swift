@@ -63,16 +63,17 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
-        NotificationCategories.register()
+        NotificationCategories.register()                    // UN actions/categories
         UNUserNotificationCenter.current().delegate = notificationDelegate
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .alarmStopOverlay() // in-app Stop/Snooze when AlarmKit UI isn't present
-                .background(ForegroundRearmCoordinator()) // re-arm after returning from Settings
-                .preferredAppearance()
+                .alarmStopOverlay()                          // in-app Stop/Snooze if AlarmKit UI isn’t visible
+                .background(ForegroundRearmCoordinator())    // re-arm after returning from Settings
+                .preferredAppearance()                       // Light/Dark/System
+                .onOpenURL { DeepLinks.handle($0) }          // deep links from Live Activity
                 .task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
         }
         .modelContainer(for: [Stack.self, Step.self])
