@@ -31,7 +31,7 @@ struct ContentView: View {
                     )
                     .listRowBackground(Color.clear)
                 } else {
-                    // Global controls (safe, no scene watchers)
+                    // Global controls
                     Section {
                         HStack {
                             Button { armAll() } label: {
@@ -79,7 +79,7 @@ struct ContentView: View {
             .navigationDestination(for: Stack.self) { stack in
                 StackDetailView(stack: stack)
             }
-            // Edit a step directly
+            // Edit a step directly (implemented in StepEditorView.swift)
             .navigationDestination(for: Step.self) { step in
                 StepEditorView(step: step)
             }
@@ -173,7 +173,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Row / chips / detail are unchanged from your working version above…
+// MARK: - Row
 
 private struct StackRow: View {
     @Bindable var stack: Stack
@@ -196,6 +196,7 @@ private struct StackRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(stack.sortedSteps) { step in
+                        // Tap to edit a step
                         NavigationLink(value: step) {
                             StepChip(step: step)
                         }
@@ -273,10 +274,13 @@ private struct StepChip: View {
     }
 }
 
+// MARK: - Detail
+
 private struct StackDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var calendar = Calendar.current
     @State private var showingAddSheet = false
+
     @Bindable var stack: Stack
 
     var body: some View {
@@ -303,6 +307,13 @@ private struct StackDetailView: View {
                     let snapshot = stack.sortedSteps
                     for i in idx { modelContext.delete(snapshot[i]) }
                     try? modelContext.save()
+                    // Auto-reschedule after deletion
+                    if stack.isArmed {
+                        Task { @MainActor in
+                            await AlarmScheduler.shared.cancelAll(for: stack)
+                            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
+                        }
+                    }
                 }
             }
         }
@@ -500,7 +511,6 @@ private struct AddStepSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
                         addStep()
-                        dismiss()
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -541,6 +551,17 @@ private struct AddStepSheet: View {
         }
         stack.steps.append(step)
         try? modelContext.save()
+
+        // Auto-reschedule when adding a step
+        if stack.isArmed {
+            Task { @MainActor in
+                await AlarmScheduler.shared.cancelAll(for: stack)
+                _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)
+                dismiss()
+            }
+        } else {
+            dismiss()
+        }
     }
 }
 
