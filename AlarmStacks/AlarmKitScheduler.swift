@@ -55,7 +55,9 @@ final class AlarmKitScheduler: AlarmScheduling {
         do { try await requestAuthorizationIfNeeded() }
         catch {
             self.log.error("AK auth error -> using UN fallback: \(error as NSError, privacy: .public)")
-            return try await self.fallback.schedule(stack: stack, calendar: calendar)
+            let ids = try await self.fallback.schedule(stack: stack, calendar: calendar)
+            await LiveActivityManager.start(for: stack, calendar: calendar)
+            return ids
         }
 
         await cancelAll(for: stack) // clear persisted AK IDs and any UN notifs
@@ -77,17 +79,15 @@ final class AlarmKitScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
-            // Build alert + attributes (IMPORTANT: set .countdown for snooze)
+            // Build alert + attributes (snooze via .countdown behaviour)
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
 
-            // Convert to a countdown duration (min 1s) and schedule as TIMER
-            let seconds = max(1, Int(ceil(fireDate.timeIntervalSinceNow)))
+            // Schedule as TIMER (AlarmKit .alarm(at:) not available in your SDK)
             let id = UUID()
-
             do {
-                self.log.info("AK scheduling TIMER id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s for \"\(stack.name, privacy: .public) — \(step.title, privacy: .public)\"")
+                let seconds = max(1, Int(ceil(fireDate.timeIntervalSinceNow)))
                 let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
                     .timer(duration: TimeInterval(seconds), attributes: attrs)
                 _ = try await self.manager.schedule(id: id, configuration: cfg)
@@ -104,14 +104,18 @@ final class AlarmKitScheduler: AlarmScheduling {
             // Roll back anything we placed with AK, then fall back to notifications.
             for u in akIDs { try? self.manager.cancel(id: u) }
             self.log.warning("AK fallback -> UN notifications for stack \"\(stack.name, privacy: .public)\". reason=\(String(describing: failureError), privacy: .public)")
-            return try await self.fallback.schedule(stack: stack, calendar: calendar)
+            let ids = try await self.fallback.schedule(stack: stack, calendar: calendar)
+            await LiveActivityManager.start(for: stack, calendar: calendar)
+            return ids
         } else {
             let strings = akIDs.map(\.uuidString)
             self.defaults.set(strings, forKey: storageKey(for: stack))
             self.log.info("AK scheduled \(strings.count, privacy: .public) timer(s) for stack \"\(stack.name, privacy: .public)\"")
+            await LiveActivityManager.start(for: stack, calendar: calendar)
             return strings
         }
     }
+
 
     func cancelAll(for stack: Stack) async {
         // Cancel AK timers we persisted.

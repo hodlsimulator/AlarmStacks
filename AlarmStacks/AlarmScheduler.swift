@@ -98,6 +98,9 @@ final class UserNotificationScheduler: AlarmScheduling {
             identifiers.append(id)
         }
 
+        // Update widget bridge + (optionally) start a Live Activity
+        await LiveActivityManager.start(for: stack, calendar: calendar)
+
         return identifiers
     }
 
