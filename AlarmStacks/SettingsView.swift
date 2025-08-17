@@ -30,6 +30,7 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            AppearancePickerView()
         }
     }
 }

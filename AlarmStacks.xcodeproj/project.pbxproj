@@ -57,6 +57,7 @@
 		E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AlarmStacksWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E12550C42E501624009BE32A /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		E12550C62E501624009BE32A /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		E12551772E5182AF009BE32A /* AlarmStacksWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AlarmStacksWidgetExtension.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -74,6 +75,21 @@
 			);
 			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
 		};
+		E125516D2E517E03009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacksWidgetExtension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AlarmControlIntents.swift,
+				NextAlarmBridge.swift,
+			);
+			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
+		};
+		E125517C2E51846F009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacks" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AlarmActivityAttributes.swift,
+			);
+			target = E125507D2E50108B009BE32A /* AlarmStacks */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -81,6 +97,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				E12550BD2E501313009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacks" target */,
+				E125516D2E517E03009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacksWidgetExtension" target */,
 			);
 			path = AlarmStacks;
 			sourceTree = "<group>";
@@ -98,6 +115,7 @@
 		E12550C82E501624009BE32A /* AlarmStacksWidget */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				E125517C2E51846F009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacks" target */,
 				E12550D62E501626009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacksWidgetExtension" target */,
 			);
 			path = AlarmStacksWidget;
@@ -142,6 +160,7 @@
 		E12550752E50108B009BE32A = {
 			isa = PBXGroup;
 			children = (
+				E12551772E5182AF009BE32A /* AlarmStacksWidgetExtension.entitlements */,
 				E12550802E50108B009BE32A /* AlarmStacks */,
 				E12550902E50109B009BE32A /* AlarmStacksTests */,
 				E125509A2E50109B009BE32A /* AlarmStacksUITests */,
@@ -521,6 +540,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = AlarmStacks/AlarmStacks.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;
@@ -528,6 +548,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacks/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -555,6 +577,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = AlarmStacks/AlarmStacks.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;
@@ -562,6 +585,8 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacks/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
+				INFOPLIST_KEY_NSSupportsLiveActivitiesFrequentUpdates = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -673,6 +698,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = AlarmStacksWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;
@@ -703,6 +729,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = AlarmStacksWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 92HEPEJ42Z;

@@ -62,6 +62,7 @@ struct StartStackIntent: AppIntent {
         let all = try ctx.fetch(FetchDescriptor<Stack>())
         guard let target = all.first(where: { $0.id == stack.id }) else { return .result() }
         _ = try? await AlarmScheduler.shared.schedule(stack: target, calendar: .current)
+        await LiveActivityManager.start(for: target, calendar: .current)
         return .result()
     }
 }
