@@ -23,7 +23,7 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
 
     // MARK: Tunables
-    /// First-install safety margin (helps the very first scheduled alarm).
+    /// First-install safety margin.
     private static let minLeadSecondsFirst  = 45
     /// Normal margin for subsequent schedules.
     private static let minLeadSecondsNormal = 12
@@ -39,6 +39,7 @@ final class AlarmKitScheduler: AlarmScheduling {
     private init() {}
 
     private func storageKey(for stack: Stack) -> String { "alarmkit.ids.\(stack.id.uuidString)" }
+    private func expectedKey(for id: UUID) -> String { "ak.expected.\(id.uuidString)" }
 
     // MARK: - Permissions
 
@@ -67,10 +68,11 @@ final class AlarmKitScheduler: AlarmScheduling {
         do { try await requestAuthorizationIfNeeded() }
         catch {
             // If AK auth fails, fall back to UN for this stack.
+            DiagLog.log("AK auth failed → UN fallback for stack \(stack.name)")
             return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
         }
 
-        // Give iOS a moment to “settle” the permission handshake on first run.
+        // Give iOS a moment to settle the permission handshake on first run.
         if firstRunBeforeAuth {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
@@ -93,27 +95,29 @@ final class AlarmKitScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
-            // Attributes
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
 
-            // Schedule as a countdown timer
             let id = UUID()
             do {
-                // Protect against any clock skew / rounding.
                 let raw = max(0, fireDate.timeIntervalSinceNow)
                 let seconds = max(minLead, Int(ceil(raw)))
 
                 log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public) (firstRun=\(firstRun, privacy: .public))")
+                DiagLog.log("AK schedule id=\(id.uuidString) in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(fireDate)")
 
                 let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
                     .timer(duration: TimeInterval(seconds), attributes: attrs)
                 _ = try await manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
 
+                // Persist the expected fire time for diagnostics (read in AlarmController).
+                defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
+
             } catch {
                 for u in akIDs { try? manager.cancel(id: u) }
+                DiagLog.log("AK schedule failed → UN fallback for \(stack.name)")
                 return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
             }
         }
@@ -129,7 +133,10 @@ final class AlarmKitScheduler: AlarmScheduling {
     func cancelAll(for stack: Stack) async {
         let key = storageKey(for: stack)
         for s in (defaults.stringArray(forKey: key) ?? []) {
-            if let id = UUID(uuidString: s) { try? manager.cancel(id: id) }
+            if let id = UUID(uuidString: s) {
+                try? manager.cancel(id: id)
+                defaults.removeObject(forKey: expectedKey(for: id))
+            }
             // Clean any legacy shadow requests if present from older builds.
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])

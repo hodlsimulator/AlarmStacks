@@ -36,7 +36,7 @@ final class AlarmController: ObservableObject {
         #endif
     }
 
-    // Observe AlarmKit; when alerting -> cancel shadow + mark fired time for LA UI
+    // Observe AlarmKit; when alerting -> mark fired + compute delta for diagnostics
     func startObserversIfNeeded() {
         #if canImport(AlarmKit)
         guard observerTask == nil else { return }
@@ -48,11 +48,24 @@ final class AlarmController: ObservableObject {
                     let newAlerting = snapshot.first(where: { $0.state == .alerting })
                     self.alertingAlarm = newAlerting
                     if let a = newAlerting {
-                        // Kill any shadow notification for this AK id.
+                        // Cancel any shadow (legacy safety; harmless if none exist).
                         let center = UNUserNotificationCenter.current()
                         let sid = "shadow-\(a.id.uuidString)"
                         center.removePendingNotificationRequests(withIdentifiers: [sid])
                         center.removeDeliveredNotifications(withIdentifiers: [sid])
+
+                        // Diagnostics: compute delta from expected time (if recorded).
+                        let key = "ak.expected.\(a.id.uuidString)"
+                        let ts = UserDefaults.standard.double(forKey: key)
+                        if ts > 0 {
+                            let expected = Date(timeIntervalSince1970: ts)
+                            let delta = Date().timeIntervalSince(expected)
+                            DiagLog.log(String(format: "AK alerting id=%@ delta=%.1fs expected=%@",
+                                               a.id.uuidString, delta, expected.description))
+                            UserDefaults.standard.removeObject(forKey: key)
+                        } else {
+                            DiagLog.log("AK alerting id=\(a.id.uuidString) (no expected fire time recorded)")
+                        }
 
                         // Tell Live Activity to freeze at fired time.
                         Task { await LiveActivityManager.markFiredNow() }
