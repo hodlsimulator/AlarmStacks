@@ -190,10 +190,9 @@ private struct StepChip: View {
     private func format(seconds: Int) -> String {
         let h = seconds / 3600
         let m = (seconds % 3600) / 60
-        let s = seconds % 60
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m" }
-        return "\(s)s"
+        return "\(seconds % 60)s"
     }
 }
 
@@ -263,7 +262,7 @@ private struct StepRow: View {
         }
     }
 
-    private func detailText(for step: Step) -> String {
+    private func detailText(for: Step) -> String {
         switch step.kind {
         case .fixedTime:
             if let h = step.hour, let m = step.minute { return String(format: "Fixed • %02d:%02d", h, m) }
