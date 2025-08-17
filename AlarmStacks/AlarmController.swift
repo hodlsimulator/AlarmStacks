@@ -20,11 +20,9 @@ final class AlarmController: ObservableObject {
     @Published private(set) var alertingAlarm: Alarm?
     @Published private(set) var lastSnapshot: [Alarm] = []
     private let manager = AlarmManager.shared
-    /// Store the observer Task so we can cancel it and avoid duplicate streams.
     private var observerTask: Task<Void, Never>?
     #endif
 
-    // MARK: - Authorisation
     func ensureAuthorised() async throws {
         #if canImport(AlarmKit)
         switch manager.authorizationState {
@@ -38,7 +36,7 @@ final class AlarmController: ObservableObject {
         #endif
     }
 
-    // MARK: - Observe AlarmKit state
+    // Observe AlarmKit; when alerting -> cancel shadow + mark fired time for LA UI
     func startObserversIfNeeded() {
         #if canImport(AlarmKit)
         guard observerTask == nil else { return }
@@ -50,11 +48,14 @@ final class AlarmController: ObservableObject {
                     let newAlerting = snapshot.first(where: { $0.state == .alerting })
                     self.alertingAlarm = newAlerting
                     if let a = newAlerting {
-                        // 🔕 AlarmKit started showing the alert: kill any shadow UN banner.
+                        // Kill any shadow notification for this AK id.
                         let center = UNUserNotificationCenter.current()
                         let sid = "shadow-\(a.id.uuidString)"
                         center.removePendingNotificationRequests(withIdentifiers: [sid])
                         center.removeDeliveredNotifications(withIdentifiers: [sid])
+
+                        // Tell Live Activity to freeze at fired time.
+                        Task { await LiveActivityManager.markFiredNow() }
                     }
                 }
             }
@@ -69,7 +70,6 @@ final class AlarmController: ObservableObject {
         #endif
     }
 
-    // MARK: - Controls
     func stop(_ id: UUID) {
         #if canImport(AlarmKit)
         try? manager.stop(id: id)

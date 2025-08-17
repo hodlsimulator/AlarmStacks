@@ -14,12 +14,12 @@ import ActivityKit
 enum LiveActivityManager {
 
     #if canImport(ActivityKit)
-    // iOS 16.2+ ActivityKit only
     private static var current: Activity<AlarmActivityAttributes>?
     private static var lastState: AlarmActivityAttributes.ContentState?
     #endif
 
-    // Compute the first upcoming step in the stack.
+    // MARK: - Next-step computation
+
     private static func nextStepInfo(for stack: Stack, calendar: Calendar) -> (title: String, fire: Date)? {
         var base = Date()
         var firstTitle: String?
@@ -44,31 +44,29 @@ enum LiveActivityManager {
         return nil
     }
 
-    // Start or update the single Live Activity for the next pending step.
+    // MARK: - Public API (iOS 16.2+ ActivityKit only)
+
     static func start(for stack: Stack, calendar: Calendar = .current) async {
         guard let info = nextStepInfo(for: stack, calendar: calendar) else {
-            // No future step — clear widget + end any existing activity with content.
             NextAlarmBridge.clear()
             #if canImport(ActivityKit)
             if let activity = current {
                 let st = lastState ?? activity.content.state
-                let content = ActivityContent(state: st, staleDate: nil)
-                await activity.end(content, dismissalPolicy: .immediate)
-                current = nil
-                lastState = nil
+                await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                current = nil; lastState = nil
             }
             #endif
             return
         }
 
-        // Always update the widget (and reload timelines).
+        // Widget bridge
         NextAlarmBridge.write(.init(stackName: stack.name, stepTitle: info.title, fireDate: info.fire))
 
         #if canImport(ActivityKit)
-        let laEnabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
-        guard laEnabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        let enabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
+        guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
-        // Adopt an existing activity if present; end extras to avoid stacking (with content).
+        // Adopt a single existing activity; end extras to avoid stacking.
         if current == nil {
             let existing = Activity<AlarmActivityAttributes>.activities
             if let first = existing.first { current = first }
@@ -78,29 +76,52 @@ enum LiveActivityManager {
             }
         }
 
-        // New state/content for the upcoming step
+        // New state/content — ensure firedAt is nil (we haven’t rung yet)
         let newState = AlarmActivityAttributes.ContentState(
             stackName: stack.name,
             stepTitle: info.title,
             ends: info.fire,
             allowSnooze: true,
-            alarmID: "" // supply AlarmKit UUID if you track it
+            alarmID: "",
+            firedAt: nil
         )
         let content = ActivityContent(state: newState, staleDate: nil)
 
         do {
             if let activity = current {
-                await activity.update(content)        // update existing
+                await activity.update(content)
             } else {
-                current = try Activity.request(       // create new
-                    attributes: AlarmActivityAttributes(),
-                    content: content,
-                    pushType: nil
-                )
+                current = try Activity.request(attributes: AlarmActivityAttributes(),
+                                               content: content,
+                                               pushType: nil)
             }
             lastState = newState
         } catch {
-            // OK if the OS/user blocks Live Activities.
+            // ignored
+        }
+        #endif
+    }
+
+    /// Mark the activity as fired *now* (sets `firedAt`), so UI shows the ring time and never counts up.
+    static func markFiredNow() async {
+        #if canImport(ActivityKit)
+        guard let activity = current else { return }
+        var st = lastState ?? activity.content.state
+        if st.firedAt == nil { st.firedAt = Date() }
+        let content = ActivityContent(state: st, staleDate: nil)
+        await activity.update(content)
+        lastState = st
+        #endif
+    }
+
+    /// End the Live Activity if its scheduled time has passed (used when app returns to foreground).
+    static func endIfExpired() async {
+        #if canImport(ActivityKit)
+        guard let activity = current else { return }
+        let st = activity.content.state
+        if st.ends <= Date() {
+            await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+            current = nil; lastState = nil
         }
         #endif
     }
@@ -110,10 +131,8 @@ enum LiveActivityManager {
         #if canImport(ActivityKit)
         if let activity = current {
             let st = lastState ?? activity.content.state
-            let content = ActivityContent(state: st, staleDate: nil)
-            await activity.end(content, dismissalPolicy: .immediate)
-            current = nil
-            lastState = nil
+            await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+            current = nil; lastState = nil
         }
         #endif
     }

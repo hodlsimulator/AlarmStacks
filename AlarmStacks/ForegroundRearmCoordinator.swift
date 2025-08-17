@@ -10,6 +10,8 @@ import SwiftData
 
 /// Invisible helper that re-arms ALL armed stacks only when the user returns
 /// from Settings after tapping our explainer's button. It never runs otherwise.
+/// Also: ends the Live Activity if its scheduled time has passed when the app
+/// returns to the foreground (prevents stale bubbles).
 struct ForegroundRearmCoordinator: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.modelContext) private var modelContext
@@ -17,8 +19,13 @@ struct ForegroundRearmCoordinator: View {
     var body: some View {
         Color.clear
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active, SettingsRearmGate.consume() {
-                    Task { await rearmAllArmed() }
+                if phase == .active {
+                    Task {
+                        await LiveActivityManager.endIfExpired()
+                        if SettingsRearmGate.consume() {
+                            await rearmAllArmed()
+                        }
+                    }
                 }
             }
     }
