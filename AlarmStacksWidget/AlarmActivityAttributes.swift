@@ -1,11 +1,7 @@
 //
 //  AlarmActivityAttributes.swift
-//  AlarmStacksWidget
-//
-//  Created by . . on 8/17/25.
-//
-//  AlarmActivityAttributes.swift
 //  AlarmStacks (shared with AlarmStacksWidget)
+//  Created by . . on 8/17/25.
 //
 
 import Foundation
@@ -13,14 +9,14 @@ import Foundation
 import ActivityKit
 
 @available(iOS 16.1, *)
-struct AlarmActivityAttributes: ActivityAttributes {
-    struct ContentState: Codable, Hashable {
-        var stackName: String
-        var stepTitle: String
-        var ends: Date
-        var allowSnooze: Bool
-        var alarmID: String
-        init(stackName: String, stepTitle: String, ends: Date, allowSnooze: Bool, alarmID: String) {
+public struct AlarmActivityAttributes: ActivityAttributes {
+    public struct ContentState: Codable, Hashable {
+        public var stackName: String
+        public var stepTitle: String
+        public var ends: Date
+        public var allowSnooze: Bool
+        public var alarmID: String
+        public init(stackName: String, stepTitle: String, ends: Date, allowSnooze: Bool, alarmID: String) {
             self.stackName = stackName
             self.stepTitle = stepTitle
             self.ends = ends
@@ -28,6 +24,6 @@ struct AlarmActivityAttributes: ActivityAttributes {
             self.alarmID = alarmID
         }
     }
-    init() {}
+    public init() {}
 }
 #endif

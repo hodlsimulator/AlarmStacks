@@ -1,7 +1,6 @@
 //
 //  AlarmStacksWidget.swift
 //  AlarmStacksWidget
-//
 //  Created by . . on 8/17/25.
 //
 
@@ -12,8 +11,7 @@ import Foundation
 import ActivityKit
 #endif
 
-// MARK: - Widget (shows next step via App Group bridge)
-
+// MARK: - Shared bridge model
 struct NextAlarmEntry: TimelineEntry {
     let date: Date
     let info: NextAlarmInfo?
@@ -30,7 +28,6 @@ struct NextAlarmProvider: TimelineProvider {
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<NextAlarmEntry>) -> Void) {
         let info = NextAlarmBridge.read()
-        // Refresh shortly after the fire date (or in ~1 min if none).
         let refresh = (info?.fireDate ?? Date()).addingTimeInterval(60)
         let entry = NextAlarmEntry(date: .now, info: info)
         completion(Timeline(entries: [entry], policy: .after(refresh)))
@@ -72,7 +69,7 @@ struct NextAlarmWidget: Widget {
     }
 }
 
-// MARK: - Live Activity UI (Dynamic Island + Lock Screen)
+// MARK: - Live Activity (Lock Screen + Dynamic Island with deep links)
 
 @available(iOSApplicationExtension 16.1, *)
 struct AlarmActivityWidget: Widget {
@@ -90,7 +87,6 @@ struct AlarmActivityWidget: Widget {
                 .foregroundStyle(.secondary)
             }
             .padding()
-            // Whole activity opens app
             .widgetURL(URL(string: "alarmstacks://activity/open"))
         } dynamicIsland: { context in
             DynamicIsland {
@@ -105,7 +101,6 @@ struct AlarmActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     HStack {
-                        // Deep links; the app decides how to handle if alarmID is missing
                         Link(destination: URL(string: "alarmstacks://action/stop?alarmID=\(context.state.alarmID)")!) {
                             Image(systemName: "stop.fill")
                         }
