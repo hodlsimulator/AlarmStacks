@@ -23,7 +23,7 @@ struct AlarmStackEntity: AppEntity, Identifiable, Hashable {
         DisplayRepresentation(title: "\(name)")
     }
 
-    init(stack: AlarmStack) {
+    init(stack: Stack) {
         self.id = stack.id
         self.name = stack.name
     }
@@ -31,16 +31,16 @@ struct AlarmStackEntity: AppEntity, Identifiable, Hashable {
 
 struct AlarmStackQuery: EntityQuery {
     func entities(for identifiers: [UUID]) async throws -> [AlarmStackEntity] {
-        let container = try ModelContainer(for: AlarmStack.self, AlarmStep.self)
+        let container = try ModelContainer(for: Stack.self, Step.self)
         let ctx = ModelContext(container)
-        let all = try ctx.fetch(FetchDescriptor<AlarmStack>())
+        let all = try ctx.fetch(FetchDescriptor<Stack>())
         return all.filter { identifiers.contains($0.id) }.map(AlarmStackEntity.init)
     }
 
     func suggestedEntities() async throws -> [AlarmStackEntity] {
-        let container = try ModelContainer(for: AlarmStack.self, AlarmStep.self)
+        let container = try ModelContainer(for: Stack.self, Step.self)
         let ctx = ModelContext(container)
-        let desc = FetchDescriptor<AlarmStack>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
+        let desc = FetchDescriptor<Stack>(sortBy: [SortDescriptor(\.createdAt, order: .reverse)])
         let stacks = try ctx.fetch(desc)
         return stacks.prefix(6).map(AlarmStackEntity.init)
     }
@@ -57,11 +57,11 @@ struct StartStackIntent: AppIntent {
     init(stack: AlarmStackEntity) { self.stack = stack }
 
     func perform() async throws -> some IntentResult {
-        let container = try ModelContainer(for: AlarmStack.self, AlarmStep.self)
+        let container = try ModelContainer(for: Stack.self, Step.self)
         let ctx = ModelContext(container)
-        let all = try ctx.fetch(FetchDescriptor<AlarmStack>())
+        let all = try ctx.fetch(FetchDescriptor<Stack>())
         guard let target = all.first(where: { $0.id == stack.id }) else { return .result() }
-        _ = try? await AlarmScheduler.shared.schedule(stack: target)
+        _ = try? await AlarmScheduler.shared.schedule(stack: target, calendar: .current)
         return .result()
     }
 }
