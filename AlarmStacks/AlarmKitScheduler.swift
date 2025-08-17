@@ -29,6 +29,8 @@ final class AlarmKitScheduler: AlarmScheduling {
     private static let minLeadSecondsNormal = 12
     /// Small settle delay right after authorization completes (first run only).
     private static let postAuthSettleMs: UInt64 = 800
+    /// Below this effective lead, AK timers are too flaky on iOS 26 beta → choose UN.
+    private static let minReliableLeadForAK = 75
 
     /// Tracks whether we have scheduled with AK at least once on this install.
     private var hasScheduledOnceAK: Bool {
@@ -61,24 +63,50 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-    // MARK: - Scheduling (AlarmKit timers only — no UN backup)
+    // MARK: - Scheduling (choose AK or UN — never both)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         let firstRunBeforeAuth = (hasScheduledOnceAK == false)
 
         do { try await requestAuthorizationIfNeeded() }
         catch {
-            // If AK auth fails, fall back to UN for this stack.
             DiagLog.log("AK auth failed → UN fallback for stack \(stack.name)")
             return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
         }
 
-        // Give iOS a moment to settle the permission handshake on first run.
         if firstRunBeforeAuth {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
 
         await cancelAll(for: stack)
 
+        // Compute FIRST enabled step's effective lead to decide backend.
+        var probeBase = Date()
+        var effectiveSecondsForFirst: Int?
+        for step in stack.sortedSteps where step.isEnabled {
+            let fireDate: Date
+            switch step.kind {
+            case .fixedTime:
+                fireDate = (try? step.nextFireDate(basedOn: Date(), calendar: calendar)) ?? Date().addingTimeInterval(3600)
+                probeBase = fireDate
+            case .timer, .relativeToPrev:
+                fireDate = (try? step.nextFireDate(basedOn: probeBase, calendar: calendar)) ?? Date().addingTimeInterval(3600)
+                probeBase = fireDate
+            }
+            let firstRun = (hasScheduledOnceAK == false)
+            let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
+            let raw = max(0, fireDate.timeIntervalSinceNow)
+            effectiveSecondsForFirst = max(minLead, Int(ceil(raw)))
+            break
+        }
+
+        if let eff = effectiveSecondsForFirst, eff < Self.minReliableLeadForAK {
+            DiagLog.log("Choosing UN: first-step lead \(eff)s < \(Self.minReliableLeadForAK)s (AK timers jitter on short leads)")
+            let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+            await LiveActivityManager.start(for: stack, calendar: calendar)
+            return ids
+        }
+
+        // Otherwise, use AlarmKit for the stack.
         var lastFireDate = Date()
         var akIDs: [UUID] = []
         let firstRun = (hasScheduledOnceAK == false)
@@ -112,13 +140,14 @@ final class AlarmKitScheduler: AlarmScheduling {
                 _ = try await manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
 
-                // Persist the expected fire time for diagnostics (read in AlarmController).
                 defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
 
             } catch {
                 for u in akIDs { try? manager.cancel(id: u) }
                 DiagLog.log("AK schedule failed → UN fallback for \(stack.name)")
-                return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+                let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+                await LiveActivityManager.start(for: stack, calendar: calendar)
+                return ids
             }
         }
 
@@ -137,7 +166,6 @@ final class AlarmKitScheduler: AlarmScheduling {
                 try? manager.cancel(id: id)
                 defaults.removeObject(forKey: expectedKey(for: id))
             }
-            // Clean any legacy shadow requests if present from older builds.
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])
             center.removeDeliveredNotifications(withIdentifiers: ["shadow-\(s)"])

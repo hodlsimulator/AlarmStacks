@@ -32,7 +32,7 @@ struct SettingsView: View {
             }
             AppearancePickerView()
             DebugSettingsSection()
-            NavigationLink("Diagnostics") { DiagnosticsView() }
+            NavigationLink("Diagnostics") { DiagnosticsView() } 
         }
     }
 }
