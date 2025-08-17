@@ -22,12 +22,20 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let defaults = UserDefaults.standard
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
 
-    // Tunables
-    private static let minLeadSeconds = 12   // avoid first-run races
-    private var shadowEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "debug.shadowFallbackEnabled") // default OFF
+    // MARK: Tunables
+    /// Give AlarmKit a bit more breathing room on the very first schedule.
+    private static let minLeadSecondsNormal = 12
+    private static let minLeadSecondsFirst  = 20
+
+    /// Optional debug toggles
+    private var debugShadowEnabled: Bool { UserDefaults.standard.bool(forKey: "debug.shadowFallbackEnabled") }
+    private static let shadowDelaySeconds = 8 // fire + 8s; we cancel if AK alerts
+
+    /// One-time safety net only for the very first AK schedule after install.
+    private var hasScheduledOnceAK: Bool {
+        get { defaults.bool(forKey: "ak.hasScheduledOnce") }
+        set { defaults.set(newValue, forKey: "ak.hasScheduledOnce") }
     }
-    private static let shadowDelaySeconds = 8 // fire + 8s (cancelled if AK alerts)
 
     private init() {}
 
@@ -57,7 +65,7 @@ final class AlarmKitScheduler: AlarmScheduling {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         do { try await requestAuthorizationIfNeeded() }
         catch {
-            // Hard fallback: if AK auth itself fails, caller’s UN path will handle.
+            // If AK auth itself fails, fall back to UN for this stack.
             return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
         }
 
@@ -65,8 +73,12 @@ final class AlarmKitScheduler: AlarmScheduling {
 
         var lastFireDate = Date()
         var akIDs: [UUID] = []
+        let firstRun = (hasScheduledOnceAK == false)
+        let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
+        let enableShadowThisRun = debugShadowEnabled || firstRun
 
         for step in stack.sortedSteps where step.isEnabled {
+            // Compute the target time
             let fireDate: Date
             switch step.kind {
             case .fixedTime:
@@ -77,14 +89,16 @@ final class AlarmKitScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
+            // Build alert/attributes
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
 
+            // Schedule as a countdown timer
             let id = UUID()
             do {
                 let raw = fireDate.timeIntervalSinceNow
-                let seconds = max(Self.minLeadSeconds, Int(ceil(raw)))
+                let seconds = max(minLead, Int(ceil(raw)))
 
                 log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public)")
 
@@ -93,8 +107,9 @@ final class AlarmKitScheduler: AlarmScheduling {
                 _ = try await manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
 
-                // Optional shadow (debug only). We schedule late and cancel on .alerting.
-                if shadowEnabled {
+                // One-time safety net (first run) OR explicit debug toggle.
+                if enableShadowThisRun {
+                    await ensureUNAuth()
                     await scheduleShadowBanner(for: id,
                                                stack: stack,
                                                step: step,
@@ -109,8 +124,12 @@ final class AlarmKitScheduler: AlarmScheduling {
             }
         }
 
-        // Start/refresh Live Activity & widget bridge (safe no-op if disabled).
+        // Mark that we've scheduled with AK at least once (disables one-time shadow from now on).
+        if firstRun { hasScheduledOnceAK = true }
+
+        // Start/refresh LA & widget (safe no-op if disabled).
         await LiveActivityManager.start(for: stack, calendar: calendar)
+
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
         return akIDs.map(\.uuidString)
     }
@@ -119,7 +138,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         let key = storageKey(for: stack)
         for s in (defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) { try? manager.cancel(id: id) }
-            // Clean any pending/delivered shadow (if it was enabled)
+            // Clean any pending/delivered shadow (if it existed)
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])
             center.removeDeliveredNotifications(withIdentifiers: ["shadow-\(s)"])
@@ -133,7 +152,15 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
     }
 
-    // MARK: - Shadow UN banner (debug only)
+    // MARK: - Shadow UN banner (safety net)
+    private func ensureUNAuth() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        if settings.authorizationStatus == .notDetermined {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge, .providesAppNotificationSettings])
+        }
+    }
+
     private func scheduleShadowBanner(for id: UUID,
                                       stack: Stack,
                                       step: Step,
