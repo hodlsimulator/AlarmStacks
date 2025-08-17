@@ -5,29 +5,31 @@
 //  Created by . . on 8/17/25.
 //
 
-import Foundation
 import SwiftUI
 
 enum DiagLog {
-    private static let key = "diag.lines.v2"
-    private static let maxLines = 200
+    private static let key = "diag.log.lines"
+    private static let maxLines = 400
 
-    private static let ts: ISO8601DateFormatter = {
+    private static let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
         return f
     }()
 
+    /// Append a line (thread-safe enough for our usage).
     static func log(_ message: String) {
-        let line = "[\(ts.string(from: Date()))] \(message)"
+        let line = "[\(iso.string(from: Date()))] \(message)"
         var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
         lines.append(line)
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
+        if lines.count > maxLines {
+            lines.removeFirst(lines.count - maxLines)
+        }
         UserDefaults.standard.set(lines, forKey: key)
     }
 
-    static func all() -> String {
-        (UserDefaults.standard.stringArray(forKey: key) ?? []).joined(separator: "\n\n")
+    static func read() -> [String] {
+        UserDefaults.standard.stringArray(forKey: key) ?? []
     }
 
     static func clear() {
@@ -35,22 +37,36 @@ enum DiagLog {
     }
 }
 
-struct DiagnosticsView: View {
-    @State private var text = DiagLog.all()
+struct DiagnosticsLogView: View {
+    @State private var lines: [String] = DiagLog.read()
 
     var body: some View {
         ScrollView {
-            Text(text.isEmpty ? "No diagnostics yet." : text)
+            Text(lines.joined(separator: "\n\n"))
                 .font(.system(.body, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                )
                 .padding()
         }
         .navigationTitle("Diagnostics")
         .toolbar {
-            ToolbarItem(placement: .topBarTrailing) { Button("Refresh") { text = DiagLog.all() } }
-            ToolbarItem(placement: .topBarTrailing) { Button("Clear") { DiagLog.clear(); text = "" } }
+            ToolbarItem(placement: .primaryAction) {
+                Button("Refresh") { lines = DiagLog.read() }
+            }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Clear") {
+                    DiagLog.clear()
+                    lines = []
+                }
+            }
         }
     }
 }

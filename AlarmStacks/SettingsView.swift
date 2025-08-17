@@ -23,6 +23,17 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+
+                // Appearance selector
+                AppearancePickerView()
+
+                // Debug toggles
+                DebugSettingsSection()
+
+                // Single diagnostics entry (kept inside the Form so we don’t duplicate it)
+                Section("Diagnostics") {
+                    NavigationLink("Diagnostics Log") { DiagnosticsLogView() }
+                }
             }
             .navigationTitle("Settings")
             .toolbar {
@@ -30,9 +41,6 @@ struct SettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
-            AppearancePickerView()
-            DebugSettingsSection()
-            NavigationLink("Diagnostics") { DiagnosticsView() } 
         }
     }
 }
