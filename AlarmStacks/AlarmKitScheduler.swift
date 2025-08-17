@@ -29,12 +29,16 @@ final class AlarmKitScheduler: AlarmScheduling {
     private static let minLeadSecondsNormal = 12
     /// Small settle delay after authorization completes (first run only).
     private static let postAuthSettleMs: UInt64 = 800
+
     /// Live control from Settings → Debug (UserDefaults). If unset, 75s.
     private var minReliableLeadForAK: Int {
         let raw = UserDefaults.standard.integer(forKey: "debug.minReliableLeadForAK")
         let value = (raw == 0 ? 75 : raw)
         return max(30, min(600, value))  // clamp 30s…10min
     }
+    private var forceUNFallback: Bool { UserDefaults.standard.bool(forKey: "debug.forceUNFallback") }
+    private var alwaysUseAK: Bool { UserDefaults.standard.bool(forKey: "debug.alwaysUseAK") }
+    private var enableShadowBackup: Bool { UserDefaults.standard.bool(forKey: "debug.enableShadowBackup") }
 
     /// Tracks whether we have scheduled with AK at least once on this install.
     private var hasScheduledOnceAK: Bool {
@@ -103,7 +107,17 @@ final class AlarmKitScheduler: AlarmScheduling {
             break
         }
 
-        if let eff = effectiveSecondsForFirst, eff < minReliableLeadForAK {
+        // Decision log (so we can see toggles + thresholds at time of choice)
+        DiagLog.log("AK decision ctx: forceUN=\(forceUNFallback) alwaysAK=\(alwaysUseAK) firstRun=\(firstRunBeforeAuth) minLeadPref=\(minReliableLeadForAK)s effFirst=\(effectiveSecondsForFirst ?? -1)s")
+
+        if forceUNFallback {
+            DiagLog.log("Choosing UN: debug.forceUNFallback=true")
+            let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+            await LiveActivityManager.start(for: stack, calendar: calendar)
+            return ids
+        }
+
+        if !alwaysUseAK, let eff = effectiveSecondsForFirst, eff < minReliableLeadForAK {
             DiagLog.log("Choosing UN: first-step lead \(eff)s < \(minReliableLeadForAK)s (AK timers jitter on short leads)")
             let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
             await LiveActivityManager.start(for: stack, calendar: calendar)
@@ -146,6 +160,24 @@ final class AlarmKitScheduler: AlarmScheduling {
 
                 defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
 
+                // Optional single-shot shadow backup (debug only)
+                if enableShadowBackup {
+                    await scheduleShadowBanner(for: id, stack: stack, step: step, fireDate: fireDate, delaySeconds: 2)
+                }
+
+                // Watchdog: if we don't observe alerting within +5s of target, log it.
+                let expectKey = expectedKey(for: id)
+                let waitNanos = UInt64(max(1, seconds + 5)) * 1_000_000_000
+                Task { [weak self] in
+                    guard let self else { return }
+                    try? await Task.sleep(nanoseconds: waitNanos)
+                    let ts = self.defaults.double(forKey: expectKey)
+                    if ts > 0 {
+                        let expected = Date(timeIntervalSince1970: ts)
+                        DiagLog.log("AK watchdog: no alert observed for id=\(id.uuidString) by \(expected + 5) (target+5s)")
+                    }
+                }
+
             } catch {
                 for u in akIDs { try? manager.cancel(id: u) }
                 DiagLog.log("AK schedule failed → UN fallback for \(stack.name)")
@@ -181,6 +213,36 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
+    }
+
+    // MARK: - Shadow UN banner (debug-only belt-and-suspenders)
+    private func scheduleShadowBanner(for id: UUID,
+                                      stack: Stack,
+                                      step: Step,
+                                      fireDate: Date,
+                                      delaySeconds: Int) async {
+        let center = UNUserNotificationCenter.current()
+        let content = UNMutableNotificationContent()
+        content.title = stack.name
+        content.subtitle = step.title
+        content.body = "Backup alert in case the alarm UI didn’t appear."
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+        content.categoryIdentifier = "ALARM_CATEGORY"
+        content.threadIdentifier = "ak-\(id.uuidString)"
+        content.userInfo = [
+            "stackID": stack.id.uuidString,
+            "stepID": step.id.uuidString,
+            "snoozeMinutes": step.snoozeMinutes,
+            "allowSnooze": step.allowSnooze
+        ]
+
+        let fire = max(1, Int(ceil(fireDate.timeIntervalSinceNow))) + max(0, delaySeconds)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(fire), repeats: false)
+        let req = UNNotificationRequest(identifier: "shadow-\(id.uuidString)", content: content, trigger: trigger)
+        do { try await center.add(req) } catch {
+            self.log.error("Shadow UN add failed \(error as NSError, privacy: .public)")
+        }
     }
 }
 

@@ -6,6 +6,8 @@
 //
 
 import SwiftUI
+import UIKit
+import UserNotifications
 
 enum DiagLog {
     private static let key = "diag.log.lines"
@@ -17,7 +19,7 @@ enum DiagLog {
         return f
     }()
 
-    /// Append a line (thread-safe enough for our usage).
+    /// Append a line.
     static func log(_ message: String) {
         let line = "[\(iso.string(from: Date()))] \(message)"
         var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
@@ -35,15 +37,25 @@ enum DiagLog {
     static func clear() {
         UserDefaults.standard.removeObject(forKey: key)
     }
+
+    /// UN summary (pending + delivered counts).
+    static func auditUN() async {
+        let c = UNUserNotificationCenter.current()
+        let pending = await c.pendingNotificationRequests()
+        let delivered = await c.deliveredNotifications()
+        log("UN audit pending=\(pending.count) delivered=\(delivered.count)")
+    }
 }
 
 struct DiagnosticsLogView: View {
     @State private var lines: [String] = DiagLog.read()
+    private var joined: String { lines.joined(separator: "\n\n") }
 
     var body: some View {
         ScrollView {
-            Text(lines.joined(separator: "\n\n"))
+            Text(joined.isEmpty ? "No entries yet." : joined)
                 .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled) // selectable / copyable
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding()
                 .background(
@@ -55,17 +67,35 @@ struct DiagnosticsLogView: View {
                         )
                 )
                 .padding()
+                .contextMenu {
+                    Button("Copy All") { UIPasteboard.general.string = joined }
+                    ShareLink(item: joined) { Label("Share…", systemImage: "square.and.arrow.up") }
+                }
         }
         .navigationTitle("Diagnostics")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Refresh") { lines = DiagLog.read() }
-            }
-            ToolbarItem(placement: .cancellationAction) {
+            ToolbarItem(placement: .navigationBarLeading) {
                 Button("Clear") {
                     DiagLog.clear()
                     lines = []
                 }
+            }
+            ToolbarItemGroup(placement: .navigationBarTrailing) {
+                Button("Copy") { UIPasteboard.general.string = joined }
+                ShareLink(item: joined) { Text("Share") }
+                Button("Refresh") { refresh(withAudits: true) }
+            }
+        }
+        .onAppear { refresh(withAudits: false) }
+    }
+
+    private func refresh(withAudits: Bool) {
+        lines = DiagLog.read()
+        if withAudits {
+            Task {
+                await DiagLog.auditUN()
+                AlarmController.shared.auditAKNow()
+                lines = DiagLog.read()
             }
         }
     }
