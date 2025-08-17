@@ -24,9 +24,11 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     // MARK: Tunables
     /// First-install safety margin (helps the very first scheduled alarm).
-    private static let minLeadSecondsFirst  = 35
+    private static let minLeadSecondsFirst  = 45
     /// Normal margin for subsequent schedules.
     private static let minLeadSecondsNormal = 12
+    /// Small settle delay right after authorization completes (first run only).
+    private static let postAuthSettleMs: UInt64 = 800
 
     /// Tracks whether we have scheduled with AK at least once on this install.
     private var hasScheduledOnceAK: Bool {
@@ -60,10 +62,17 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     // MARK: - Scheduling (AlarmKit timers only — no UN backup)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
+        let firstRunBeforeAuth = (hasScheduledOnceAK == false)
+
         do { try await requestAuthorizationIfNeeded() }
         catch {
-            // If AK auth itself fails, fall back to UN for this stack.
+            // If AK auth fails, fall back to UN for this stack.
             return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+        }
+
+        // Give iOS a moment to “settle” the permission handshake on first run.
+        if firstRunBeforeAuth {
+            try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
 
         await cancelAll(for: stack)
@@ -92,10 +101,11 @@ final class AlarmKitScheduler: AlarmScheduling {
             // Schedule as a countdown timer
             let id = UUID()
             do {
-                let raw = fireDate.timeIntervalSinceNow
+                // Protect against any clock skew / rounding.
+                let raw = max(0, fireDate.timeIntervalSinceNow)
                 let seconds = max(minLead, Int(ceil(raw)))
 
-                log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public)")
+                log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public) (firstRun=\(firstRun, privacy: .public))")
 
                 let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
                     .timer(duration: TimeInterval(seconds), attributes: attrs)
