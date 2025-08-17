@@ -12,6 +12,7 @@ import SwiftData
 import SwiftUI
 import AlarmKit
 import os.log
+import UserNotifications
 
 @MainActor
 final class AlarmKitScheduler: AlarmScheduling {
@@ -49,9 +50,9 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-    // MARK: - Scheduling (timers only; fixed-time converted to countdown)
+    // MARK: - Scheduling (all steps scheduled as AlarmKit timers)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
-        // If AK auth fails (or framework unavailable), use notifications.
+        // If AK auth fails, use notifications.
         do { try await requestAuthorizationIfNeeded() }
         catch {
             self.log.error("AK auth error -> using UN fallback: \(error as NSError, privacy: .public)")
@@ -68,7 +69,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         var failureError: NSError?
 
         for step in stack.sortedSteps where step.isEnabled {
-            // Compute target wall-clock time for this step
+            // Compute target time for this step
             let fireDate: Date
             switch step.kind {
             case .fixedTime:
@@ -84,7 +85,7 @@ final class AlarmKitScheduler: AlarmScheduling {
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
 
-            // Schedule as TIMER (AlarmKit .alarm(at:) not available in your SDK)
+            // Schedule as TIMER (AlarmKit .alarm(at:) may not be available)
             let id = UUID()
             do {
                 let seconds = max(1, Int(ceil(fireDate.timeIntervalSinceNow)))
@@ -92,6 +93,14 @@ final class AlarmKitScheduler: AlarmScheduling {
                     .timer(duration: TimeInterval(seconds), attributes: attrs)
                 _ = try await self.manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
+
+                // 🔐 Shadow banner: only fires if AK fails to present.
+                await scheduleShadowBanner(for: id,
+                                           stack: stack,
+                                           step: step,
+                                           fireDate: fireDate,
+                                           delaySeconds: 2) // slight delay after expected AK alert
+
             } catch {
                 akFailed = true
                 failureError = (error as NSError)
@@ -101,7 +110,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
 
         if akFailed {
-            // Roll back anything we placed with AK, then fall back to notifications.
+            // Roll back anything we placed with AK, then fallback to notifications.
             for u in akIDs { try? self.manager.cancel(id: u) }
             self.log.warning("AK fallback -> UN notifications for stack \"\(stack.name, privacy: .public)\". reason=\(String(describing: failureError), privacy: .public)")
             let ids = try await self.fallback.schedule(stack: stack, calendar: calendar)
@@ -116,12 +125,15 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-
     func cancelAll(for stack: Stack) async {
         // Cancel AK timers we persisted.
         let key = storageKey(for: stack)
         for s in (self.defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) { try? self.manager.cancel(id: id) }
+            // Also cancel any shadow notifications for these ids.
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])
+            center.removeDeliveredNotifications(withIdentifiers: ["shadow-\(s)"])
         }
         self.defaults.removeObject(forKey: key)
 
@@ -132,6 +144,37 @@ final class AlarmKitScheduler: AlarmScheduling {
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
         for s in stacks where s.isArmed {
             _ = try? await schedule(stack: s, calendar: calendar)
+        }
+    }
+
+    // MARK: - Shadow UN banner (belt-and-suspenders)
+    private func scheduleShadowBanner(for id: UUID,
+                                      stack: Stack,
+                                      step: Step,
+                                      fireDate: Date,
+                                      delaySeconds: Int) async {
+        let center = UNUserNotificationCenter.current()
+        // Build content
+        let content = UNMutableNotificationContent()
+        content.title = stack.name
+        content.subtitle = step.title
+        content.body = "Backup alert in case the alarm UI didn’t appear."
+        content.sound = .default
+        content.interruptionLevel = .timeSensitive
+        content.categoryIdentifier = "ALARM_CATEGORY"
+        content.threadIdentifier = "ak-\(id.uuidString)"
+        content.userInfo = [
+            "stackID": stack.id.uuidString,
+            "stepID": step.id.uuidString,
+            "snoozeMinutes": step.snoozeMinutes,
+            "allowSnooze": step.allowSnooze
+        ]
+
+        let fire = max(1, Int(ceil(fireDate.timeIntervalSinceNow))) + max(0, delaySeconds)
+        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(fire), repeats: false)
+        let req = UNNotificationRequest(identifier: "shadow-\(id.uuidString)", content: content, trigger: trigger)
+        do { try await center.add(req) } catch {
+            self.log.error("Shadow UN add failed \(error as NSError, privacy: .public)")
         }
     }
 }
@@ -162,7 +205,6 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
 }
 
 private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<EmptyMetadata> {
-    // Blue accent for better contrast/legibility
     AlarmAttributes(presentation: AlarmPresentation(alert: alert),
                     tintColor: Color(red: 0.04, green: 0.52, blue: 1.00)) // #0A84FF
 }

@@ -5,15 +5,9 @@
 //  Created by . . on 8/16/25.
 //
 
-//
-//  AlarmController.swift
-//  AlarmStacks
-//
-//  Created by . . on 8/16/25.
-//
-
 import SwiftUI
 import Combine
+import UserNotifications
 #if canImport(AlarmKit)
 import AlarmKit
 #endif
@@ -53,7 +47,15 @@ final class AlarmController: ObservableObject {
             for await snapshot in manager.alarmUpdates {
                 await MainActor.run {
                     self.lastSnapshot = snapshot
-                    self.alertingAlarm = snapshot.first(where: { $0.state == .alerting })
+                    let newAlerting = snapshot.first(where: { $0.state == .alerting })
+                    self.alertingAlarm = newAlerting
+                    if let a = newAlerting {
+                        // 🔕 AlarmKit started showing the alert: kill any shadow UN banner.
+                        let center = UNUserNotificationCenter.current()
+                        let sid = "shadow-\(a.id.uuidString)"
+                        center.removePendingNotificationRequests(withIdentifiers: [sid])
+                        center.removeDeliveredNotifications(withIdentifiers: [sid])
+                    }
                 }
             }
         }
