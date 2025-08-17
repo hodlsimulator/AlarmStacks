@@ -13,11 +13,31 @@ import UserNotifications
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
-        [.banner, .sound, .list]
+        let id = notification.request.identifier
+        if let ts = UserDefaults.standard.object(forKey: "un.expected.\(id)") as? Double {
+            let expected = Date(timeIntervalSince1970: ts)
+            let delta = Date().timeIntervalSince(expected)
+            DiagLog.log(String(format: "UN willPresent id=%@ delta=%.1fs expected=%@", id, delta, expected as CVarArg))
+            UserDefaults.standard.removeObject(forKey: "un.expected.\(id)")
+        } else {
+            DiagLog.log("UN willPresent id=\(id)")
+        }
+        return [.banner, .sound, .list]
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse) async {
+        let id = response.notification.request.identifier
+        if let ts = UserDefaults.standard.object(forKey: "un.expected.\(id)") as? Double {
+            let expected = Date(timeIntervalSince1970: ts)
+            let delta = Date().timeIntervalSince(expected)
+            DiagLog.log(String(format: "UN didReceive action=%@ id=%@ delta=%.1fs expected=%@",
+                               response.actionIdentifier, id, delta, expected as CVarArg))
+            UserDefaults.standard.removeObject(forKey: "un.expected.\(id)")
+        } else {
+            DiagLog.log("UN didReceive action=\(response.actionIdentifier) id=\(id)")
+        }
+
         let content = response.notification.request.content
         switch response.actionIdentifier {
         case NotificationActionID.snooze:
@@ -54,6 +74,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                                                         repeats: false)
         let id = "snooze-\(UUID().uuidString)"
         let req = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
+        DiagLog.log("UN schedule (snooze) id=\(id) in \(snoozeMinutes)m thread=\(original.threadIdentifier)")
         try? await center.add(req)
     }
 }
@@ -63,21 +84,18 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
-        // UN actions/categories for the fallback path and snooze/stop actions.
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
-
-        // ✅ PRIME AlarmKit authorisation at app launch to avoid a first-run race.
-        Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
     }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .alarmStopOverlay()                        // in-app Stop/Snooze if AK UI isn’t visible
-                .background(ForegroundRearmCoordinator())  // re-arm after returning from Settings
-                .preferredAppearance()                     // Light/Dark/System
-                .onOpenURL { DeepLinks.handle($0) }        // deep links from Live Activity
+                .alarmStopOverlay()
+                .background(ForegroundRearmCoordinator())
+                .preferredAppearance()
+                .onOpenURL { DeepLinks.handle($0) }
+                .task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
         }
         .modelContainer(for: [Stack.self, Step.self])
     }

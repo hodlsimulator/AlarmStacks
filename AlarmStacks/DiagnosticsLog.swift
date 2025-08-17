@@ -8,23 +8,26 @@
 import Foundation
 import SwiftUI
 
-/// Tiny ring buffer stored in UserDefaults so you can read it inside the app.
-@MainActor
 enum DiagLog {
-    private static let key = "diag.lines.v1"
-    private static let maxCount = 300
+    private static let key = "diag.lines.v2"
+    private static let maxLines = 200
 
-    static func log(_ msg: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        let line = "[\(stamp)] \(msg)"
+    private static let ts: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func log(_ message: String) {
+        let line = "[\(ts.string(from: Date()))] \(message)"
         var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
         lines.append(line)
-        if lines.count > maxCount { lines.removeFirst(lines.count - maxCount) }
+        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
         UserDefaults.standard.set(lines, forKey: key)
     }
 
-    static func lines() -> [String] {
-        UserDefaults.standard.stringArray(forKey: key) ?? []
+    static func all() -> String {
+        (UserDefaults.standard.stringArray(forKey: key) ?? []).joined(separator: "\n\n")
     }
 
     static func clear() {
@@ -32,19 +35,22 @@ enum DiagLog {
     }
 }
 
-/// Simple UI to view/copy logs (optional; link it from Settings).
 struct DiagnosticsView: View {
-    @State private var lines: [String] = []
+    @State private var text = DiagLog.all()
 
     var body: some View {
-        List(lines.reversed(), id: \.self) { Text($0).font(.caption.monospaced()) }
-            .navigationTitle("Diagnostics")
-            .toolbar {
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Refresh") { lines = DiagLog.lines() }
-                    Button("Clear")   { DiagLog.clear(); lines = [] }
-                }
-            }
-            .task { lines = DiagLog.lines() }
+        ScrollView {
+            Text(text.isEmpty ? "No diagnostics yet." : text)
+                .font(.system(.body, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .padding()
+        }
+        .navigationTitle("Diagnostics")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { Button("Refresh") { text = DiagLog.all() } }
+            ToolbarItem(placement: .topBarTrailing) { Button("Clear") { DiagLog.clear(); text = "" } }
+        }
     }
 }

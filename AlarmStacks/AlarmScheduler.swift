@@ -34,7 +34,6 @@ final class UserNotificationScheduler: AlarmScheduling {
 
         switch settings.authorizationStatus {
         case .notDetermined:
-            // Do NOT request .criticalAlert unless you have the entitlement.
             let granted = try await center.requestAuthorization(
                 options: [.alert, .sound, .badge, .providesAppNotificationSettings]
             )
@@ -82,19 +81,26 @@ final class UserNotificationScheduler: AlarmScheduling {
             let id = notificationID(stackID: stack.id, stepID: step.id, index: index)
             let content = buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString)
 
-            // Trigger
+            // Robust trigger selection near "now"
+            let lead = max(1, Int(ceil(fireDate.timeIntervalSinceNow)))
+            let useInterval = (lead <= 60)
+
             let trigger: UNNotificationTrigger
-            if step.kind == .fixedTime || step.kind == .relativeToPrev {
-                let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second],
-                                                    from: fireDate)
-                trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+            if useInterval {
+                trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(lead), repeats: false)
+                DiagLog.log("UN schedule id=\(id) in \(lead)s (interval); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
             } else {
-                let interval = max(1, Int(fireDate.timeIntervalSinceNow.rounded()))
-                trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(interval), repeats: false)
+                let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
+                trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+                DiagLog.log("UN schedule id=\(id) in ~\(lead)s (calendar); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
             }
 
             let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
             try await center.add(request)
+
+            // Track expected time so we can compute a delivery delta later.
+            UserDefaults.standard.set(fireDate.timeIntervalSince1970, forKey: "un.expected.\(id)")
+
             identifiers.append(id)
         }
 
@@ -110,9 +116,11 @@ final class UserNotificationScheduler: AlarmScheduling {
 
         let pending = await pendingIDs(prefix: prefix)
         center.removePendingNotificationRequests(withIdentifiers: pending)
+        for id in pending { UserDefaults.standard.removeObject(forKey: "un.expected.\(id)") }
 
         let delivered = await deliveredIDs(prefix: prefix)
         center.removeDeliveredNotifications(withIdentifiers: delivered)
+        for id in delivered { UserDefaults.standard.removeObject(forKey: "un.expected.\(id)") }
     }
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
@@ -132,24 +140,20 @@ final class UserNotificationScheduler: AlarmScheduling {
         content.interruptionLevel = .timeSensitive
         content.threadIdentifier = "stack-\(stackID)"
 
-        // Add actions (Stop/Snooze) support.
-        content.categoryIdentifier = "ALARM_CATEGORY" // matches the category you register in app start-up
+        content.categoryIdentifier = "ALARM_CATEGORY"
         content.userInfo = [
             "stackID": stackID,
             "stepID": step.id.uuidString,
-            "snoozeMinutes": step.snoozeMinutes, // per-step wins
+            "snoozeMinutes": step.snoozeMinutes,
             "allowSnooze": step.allowSnooze
         ]
-
         return content
     }
 
     private func body(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
-            if let h = step.hour, let m = step.minute {
-                return String(format: "Scheduled for %02d:%02d", h, m)
-            }
+            if let h = step.hour, let m = step.minute { return String(format: "Scheduled for %02d:%02d", h, m) }
             return "Scheduled"
         case .timer:
             if let s = step.durationSeconds { return "Timer \(format(seconds: s))" }

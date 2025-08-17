@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import UserNotifications
 
 /// Invisible helper that re-arms ALL armed stacks only when the user returns
 /// from Settings after tapping our explainer's button. It never runs otherwise.
@@ -22,6 +23,7 @@ struct ForegroundRearmCoordinator: View {
                 if phase == .active {
                     Task {
                         await LiveActivityManager.endIfExpired()
+                        await auditUN() // log what actually happened while we were away
                         if SettingsRearmGate.consume() {
                             await rearmAllArmed()
                         }
@@ -36,5 +38,35 @@ struct ForegroundRearmCoordinator: View {
         let armed = stacks.filter { $0.isArmed }
         guard !armed.isEmpty else { return }
         await AlarmScheduler.shared.rescheduleAll(stacks: armed, calendar: .current)
+    }
+
+    private func auditUN() async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let delivered = await center.deliveredNotifications()
+
+        DiagLog.log("UN audit pending=\(pending.count) delivered=\(delivered.count)")
+
+        for d in delivered {
+            let id = d.request.identifier
+            if let ts = UserDefaults.standard.object(forKey: "un.expected.\(id)") as? Double {
+                let expected = Date(timeIntervalSince1970: ts)
+                let delta = Date().timeIntervalSince(expected)
+                DiagLog.log(String(format: "UN delivered id=%@ delta=%.1fs expected=%@", id, delta, expected as CVarArg))
+                UserDefaults.standard.removeObject(forKey: "un.expected.\(id)")
+            }
+        }
+
+        // If anything is still pending well after expected, note it.
+        let now = Date()
+        for p in pending {
+            let id = p.identifier
+            if let ts = UserDefaults.standard.object(forKey: "un.expected.\(id)") as? Double {
+                let expected = Date(timeIntervalSince1970: ts)
+                if now.timeIntervalSince(expected) > 20 {
+                    DiagLog.log("UN pending past expected id=\(id) by ~\(Int(now.timeIntervalSince(expected)))s")
+                }
+            }
+        }
     }
 }

@@ -27,10 +27,14 @@ final class AlarmKitScheduler: AlarmScheduling {
     private static let minLeadSecondsFirst  = 45
     /// Normal margin for subsequent schedules.
     private static let minLeadSecondsNormal = 12
-    /// Small settle delay right after authorization completes (first run only).
+    /// Small settle delay after authorization completes (first run only).
     private static let postAuthSettleMs: UInt64 = 800
-    /// Below this effective lead, AK timers are too flaky on iOS 26 beta → choose UN.
-    private static let minReliableLeadForAK = 75
+    /// Live control from Settings → Debug (UserDefaults). If unset, 75s.
+    private var minReliableLeadForAK: Int {
+        let raw = UserDefaults.standard.integer(forKey: "debug.minReliableLeadForAK")
+        let value = (raw == 0 ? 75 : raw)
+        return max(30, min(600, value))  // clamp 30s…10min
+    }
 
     /// Tracks whether we have scheduled with AK at least once on this install.
     private var hasScheduledOnceAK: Bool {
@@ -99,8 +103,8 @@ final class AlarmKitScheduler: AlarmScheduling {
             break
         }
 
-        if let eff = effectiveSecondsForFirst, eff < Self.minReliableLeadForAK {
-            DiagLog.log("Choosing UN: first-step lead \(eff)s < \(Self.minReliableLeadForAK)s (AK timers jitter on short leads)")
+        if let eff = effectiveSecondsForFirst, eff < minReliableLeadForAK {
+            DiagLog.log("Choosing UN: first-step lead \(eff)s < \(minReliableLeadForAK)s (AK timers jitter on short leads)")
             let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
             await LiveActivityManager.start(for: stack, calendar: calendar)
             return ids
@@ -132,7 +136,7 @@ final class AlarmKitScheduler: AlarmScheduling {
                 let raw = max(0, fireDate.timeIntervalSinceNow)
                 let seconds = max(minLead, Int(ceil(raw)))
 
-                log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public) (firstRun=\(firstRun, privacy: .public))")
+                log.info("AK schedule id=\(id.uuidString, privacy: .public) in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public)")
                 DiagLog.log("AK schedule id=\(id.uuidString) in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(fireDate)")
 
                 let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
