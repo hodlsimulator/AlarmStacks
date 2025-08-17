@@ -158,8 +158,9 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
 }
 
 private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<EmptyMetadata> {
-    // Changed from hot pink/red to a calmer, legible system blue.
-    AlarmAttributes(presentation: AlarmPresentation(alert: alert), tintColor: .blue)
+    // Blue accent for better contrast/legibility
+    AlarmAttributes(presentation: AlarmPresentation(alert: alert),
+                    tintColor: Color(red: 0.04, green: 0.52, blue: 1.00)) // #0A84FF
 }
 
 #endif

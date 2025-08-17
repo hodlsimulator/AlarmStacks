@@ -19,13 +19,17 @@ struct ContentView: View {
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
 
     @State private var showingAddStack = false
+    @State private var showingSettings = false
 
     var body: some View {
         NavigationStack {
             List {
                 if stacks.isEmpty {
-                    EmptyState(addAction: addSampleStacks)
-                        .listRowBackground(Color.clear)
+                    EmptyState(
+                        addSamples: { addSampleStacks() },
+                        createNew: { showingAddStack = true }
+                    )
+                    .listRowBackground(Color.clear)
                 } else {
                     // Global controls (safe, no scene watchers)
                     Section {
@@ -61,6 +65,11 @@ struct ContentView: View {
             .listStyle(.insetGrouped)
             .navigationTitle("Alarm Stacks")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showingSettings = true } label: {
+                        Label("Settings", systemImage: "gearshape")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingAddStack = true } label: {
                         Label("Add Stack", systemImage: "plus")
@@ -70,7 +79,7 @@ struct ContentView: View {
             .navigationDestination(for: Stack.self) { stack in
                 StackDetailView(stack: stack)
             }
-            // Edit a step
+            // Edit a step directly
             .navigationDestination(for: Step.self) { step in
                 StepEditorView(step: step)
             }
@@ -81,6 +90,10 @@ struct ContentView: View {
                 try? modelContext.save()
             }
             .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+        }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView()
+                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
     }
 
@@ -137,10 +150,11 @@ struct ContentView: View {
     private func sampleMorning() -> Stack {
         let s = Stack(name: "Morning")
         let now = Date()
-        let wake = Step(title: "Wake", kind: .fixedTime, order: 0, createdAt: now, hour: 6, minute: 30, stack: s)
-        let hydrate = Step(title: "Hydrate", kind: .relativeToPrev, order: 1, createdAt: now, offsetSeconds: 10*60, allowSnooze: false, snoozeMinutes: 5, stack: s)
-        let stretch = Step(title: "Stretch", kind: .timer, order: 2, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: 5, stack: s)
-        let shower = Step(title: "Shower", kind: .relativeToPrev, order: 3, createdAt: now, offsetSeconds: 20*60, allowSnooze: false, snoozeMinutes: 5, stack: s)
+        let def = Settings.shared
+        let wake = Step(title: "Wake", kind: .fixedTime, order: 0, createdAt: now, hour: 6, minute: 30, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+        let hydrate = Step(title: "Hydrate", kind: .relativeToPrev, order: 1, createdAt: now, offsetSeconds: 10*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+        let stretch = Step(title: "Stretch", kind: .timer, order: 2, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+        let shower = Step(title: "Shower", kind: .relativeToPrev, order: 3, createdAt: now, offsetSeconds: 20*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         s.steps = [wake, hydrate, stretch, shower]
         return s
     }
@@ -148,17 +162,18 @@ struct ContentView: View {
     private func samplePomodoro() -> Stack {
         let s = Stack(name: "Pomodoro")
         let now = Date()
+        let def = Settings.shared
         s.steps = [
-            Step(title: "Focus", kind: .timer, order: 0, createdAt: now, durationSeconds: 25*60, allowSnooze: false, stack: s),
-            Step(title: "Break", kind: .timer, order: 1, createdAt: now, durationSeconds: 5*60, allowSnooze: false, stack: s),
-            Step(title: "Focus", kind: .timer, order: 2, createdAt: now, durationSeconds: 25*60, allowSnooze: false, stack: s),
-            Step(title: "Break", kind: .timer, order: 3, createdAt: now, durationSeconds: 5*60, allowSnooze: false, stack: s)
+            Step(title: "Focus", kind: .timer, order: 0, createdAt: now, durationSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Break", kind: .timer, order: 1, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Focus", kind: .timer, order: 2, createdAt: now, durationSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Break", kind: .timer, order: 3, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         ]
         return s
     }
 }
 
-// MARK: - Row
+// MARK: - Row / chips / detail are unchanged from your working version above…
 
 private struct StackRow: View {
     @Bindable var stack: Stack
@@ -181,7 +196,6 @@ private struct StackRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(stack.sortedSteps) { step in
-                        // Tap a chip to edit that step
                         NavigationLink(value: step) {
                             StepChip(step: step)
                         }
@@ -200,11 +214,8 @@ private struct StepChip: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: icon(for: step))
-                .imageScale(.small)
-            Text(label(for: step))
-                .font(.caption)
-                .lineLimit(1)
+            Image(systemName: icon(for: step)).imageScale(.small)
+            Text(label(for: step)).font(.caption).lineLimit(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -237,11 +248,10 @@ private struct StepChip: View {
     }
 
     private func format(seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m" }
-        return "\(seconds % 60)s"
+        return "\(s)s"
     }
 
     private func daysText(for step: Step) -> String {
@@ -263,13 +273,10 @@ private struct StepChip: View {
     }
 }
 
-// MARK: - Detail
-
 private struct StackDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var calendar = Calendar.current
     @State private var showingAddSheet = false
-
     @Bindable var stack: Stack
 
     var body: some View {
@@ -290,9 +297,7 @@ private struct StackDetailView: View {
 
             Section("Steps") {
                 ForEach(stack.sortedSteps) { step in
-                    NavigationLink(value: step) {
-                        StepRow(step: step)
-                    }
+                    NavigationLink(value: step) { StepRow(step: step) }
                 }
                 .onDelete { idx in
                     let snapshot = stack.sortedSteps
@@ -322,15 +327,12 @@ private struct StepRow: View {
         HStack {
             VStack(alignment: .leading) {
                 Text(step.title).font(.headline)
-                Text(detailText(for: step))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Text(detailText(for: step)).font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
-
     private func detailText(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
@@ -346,16 +348,12 @@ private struct StepRow: View {
             return "After previous"
         }
     }
-
     private func format(seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
         if h > 0 { return "\(h)h \(m)m" }
         if m > 0 { return "\(m)m \(s)s" }
         return "\(s)s"
     }
-
     private func daysText(for step: Step) -> String {
         let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
         let chosen: [Int]
@@ -418,7 +416,9 @@ private struct AddStackSheet: View {
                     Button("Create") {
                         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                         let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
+
                         if addFirstStep {
+                            let def = Settings.shared
                             let order = 0
                             let step: Step
                             switch firstStepKind {
@@ -427,26 +427,33 @@ private struct AddStackSheet: View {
                                             kind: .fixedTime,
                                             order: order,
                                             hour: hour, minute: minute,
+                                            allowSnooze: def.defaultAllowSnooze,
+                                            snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
                             case .timer:
                                 step = Step(title: "Timer",
                                             kind: .timer,
                                             order: order,
                                             durationSeconds: minutesAmount * 60,
+                                            allowSnooze: def.defaultAllowSnooze,
+                                            snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
                             case .relativeToPrev:
                                 step = Step(title: "After previous",
                                             kind: .relativeToPrev,
                                             order: order,
                                             offsetSeconds: minutesAmount * 60,
+                                            allowSnooze: def.defaultAllowSnooze,
+                                            snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
                             }
                             s.steps = [step]
                         }
+
                         onCreate(s)
                         dismiss()
                     }
-                    // NOTE: do NOT disable when name is empty → we default to "Untitled"
+                    // Keep enabled even when name empty → defaults to "Untitled"
                 }
             }
         }
@@ -503,6 +510,7 @@ private struct AddStepSheet: View {
 
     private func addStep() {
         let order = (stack.sortedSteps.last?.order ?? -1) + 1
+        let def = Settings.shared
         let step: Step
         switch kind {
         case .fixedTime:
@@ -511,18 +519,24 @@ private struct AddStepSheet: View {
                         order: order,
                         hour: hour,
                         minute: minute,
+                        allowSnooze: def.defaultAllowSnooze,
+                        snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
         case .timer:
             step = Step(title: title,
                         kind: .timer,
                         order: order,
                         durationSeconds: minutesAmount * 60,
+                        allowSnooze: def.defaultAllowSnooze,
+                        snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
         case .relativeToPrev:
             step = Step(title: title,
                         kind: .relativeToPrev,
                         order: order,
                         offsetSeconds: minutesAmount * 60,
+                        allowSnooze: def.defaultAllowSnooze,
+                        snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
         }
         stack.steps.append(step)
@@ -533,7 +547,9 @@ private struct AddStepSheet: View {
 // MARK: - Empty State
 
 private struct EmptyState: View {
-    var addAction: () -> Void
+    var addSamples: () -> Void
+    var createNew: () -> Void
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "alarm.fill").font(.largeTitle)
@@ -541,8 +557,8 @@ private struct EmptyState: View {
             Text("Create a stack or add sample ones to get started.")
                 .foregroundStyle(.secondary)
             HStack {
-                Button("Add Sample Stacks", action: addAction)
-                Button("Create New") { /* handled by + button in toolbar */ }
+                Button("Add Sample Stacks", action: addSamples)
+                Button("Create New", action: createNew)
             }
             .buttonStyle(.bordered)
         }
