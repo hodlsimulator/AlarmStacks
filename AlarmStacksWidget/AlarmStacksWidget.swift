@@ -38,23 +38,45 @@ struct NextAlarmWidgetView: View {
     var entry: NextAlarmProvider.Entry
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let info = entry.info {
-                Text(info.stackName).font(.headline)
-                Text(info.stepTitle).font(.subheadline)
-                HStack {
-                    Image(systemName: "timer")
-                    Text(info.fireDate, style: .relative)
+        // Adopt container background on iOS 17+ to remove the system message.
+        if #available(iOSApplicationExtension 17.0, *) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let info = entry.info {
+                    Text(info.stackName).font(.headline)
+                    Text(info.stepTitle).font(.subheadline)
+                    HStack {
+                        Image(systemName: "timer")
+                        Text(info.fireDate, style: .relative)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("No upcoming step").font(.headline)
+                    Text("Open AlarmStacks").font(.footnote).foregroundStyle(.secondary)
                 }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            } else {
-                Text("No upcoming step").font(.headline)
-                Text("Open AlarmStacks").font(.footnote).foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
+            .padding()
+            .containerBackground(.fill.tertiary, for: .widget)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                if let info = entry.info {
+                    Text(info.stackName).font(.headline)
+                    Text(info.stepTitle).font(.subheadline)
+                    HStack {
+                        Image(systemName: "timer")
+                        Text(info.fireDate, style: .relative)
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                } else {
+                    Text("No upcoming step").font(.headline)
+                    Text("Open AlarmStacks").font(.footnote).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding()
         }
-        .padding()
     }
 }
 
@@ -75,7 +97,6 @@ struct NextAlarmWidget: Widget {
 struct AlarmActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
-            // Lock Screen / Banner
             VStack(alignment: .leading) {
                 Text(context.state.stackName).font(.headline)
                 Text(context.state.stepTitle).font(.subheadline)
@@ -90,9 +111,7 @@ struct AlarmActivityWidget: Widget {
             .widgetURL(URL(string: "alarmstacks://activity/open"))
         } dynamicIsland: { context in
             DynamicIsland {
-                DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "alarm.fill")
-                }
+                DynamicIslandExpandedRegion(.leading) { Image(systemName: "alarm.fill") }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading) {
                         Text(context.state.stackName).font(.headline)
@@ -117,13 +136,9 @@ struct AlarmActivityWidget: Widget {
                         Text(context.state.ends, style: .timer)
                     }
                 }
-            } compactLeading: {
-                Image(systemName: "alarm.fill")
-            } compactTrailing: {
-                Text(context.state.ends, style: .timer)
-            } minimal: {
-                Image(systemName: "alarm.fill")
-            }
+            } compactLeading: { Image(systemName: "alarm.fill") }
+              compactTrailing: { Text(context.state.ends, style: .timer) }
+              minimal: { Image(systemName: "alarm.fill") }
         }
     }
 }

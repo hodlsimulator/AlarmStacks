@@ -47,16 +47,15 @@ enum LiveActivityManager {
     }
 
     static func start(for stack: Stack, calendar: Calendar = .current) async {
-        let laEnabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
-        guard laEnabled else { return }
         guard let info = nextStepInfo(for: stack, calendar: calendar) else { return }
 
-        // Update widget bridge
+        // Always update the widget bridge (this triggers a widget reload).
         NextAlarmBridge.write(.init(stackName: stack.name, stepTitle: info.title, fireDate: info.fire))
 
         #if canImport(ActivityKit)
         if #available(iOS 16.1, *) {
-            guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+            let liveActivitiesEnabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
+            guard liveActivitiesEnabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
             let attributes = AlarmActivityAttributes()
             let state = AlarmActivityAttributes.ContentState(
@@ -64,7 +63,7 @@ enum LiveActivityManager {
                 stepTitle: info.title,
                 ends: info.fire,
                 allowSnooze: true,
-                alarmID: "" // pass a real AlarmKit UUID string if available
+                alarmID: "" // supply a real AlarmKit UUID string if available
             )
 
             do {
@@ -76,7 +75,7 @@ enum LiveActivityManager {
                 }
                 lastState = state
             } catch {
-                // Ignore failures (user may have Live Activities off)
+                // ignore if user disabled Live Activities at system level
             }
         }
         #endif
