@@ -23,15 +23,11 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
 
     // MARK: Tunables
-    /// Give AlarmKit a bit more breathing room on the very first schedule.
+    /// Give AlarmKit a bit more breathing room on the very first schedule after install.
     private static let minLeadSecondsNormal = 12
     private static let minLeadSecondsFirst  = 20
 
-    /// Optional debug toggles
-    private var debugShadowEnabled: Bool { UserDefaults.standard.bool(forKey: "debug.shadowFallbackEnabled") }
-    private static let shadowDelaySeconds = 8 // fire + 8s; we cancel if AK alerts
-
-    /// One-time safety net only for the very first AK schedule after install.
+    /// Tracks whether we have ever successfully scheduled with AlarmKit on this install.
     private var hasScheduledOnceAK: Bool {
         get { defaults.bool(forKey: "ak.hasScheduledOnce") }
         set { defaults.set(newValue, forKey: "ak.hasScheduledOnce") }
@@ -61,7 +57,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-    // MARK: - Scheduling (AlarmKit timers)
+    // MARK: - Scheduling (AlarmKit timers only — no UN backup)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         do { try await requestAuthorizationIfNeeded() }
         catch {
@@ -75,7 +71,6 @@ final class AlarmKitScheduler: AlarmScheduling {
         var akIDs: [UUID] = []
         let firstRun = (hasScheduledOnceAK == false)
         let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
-        let enableShadowThisRun = debugShadowEnabled || firstRun
 
         for step in stack.sortedSteps where step.isEnabled {
             // Compute the target time
@@ -107,16 +102,6 @@ final class AlarmKitScheduler: AlarmScheduling {
                 _ = try await manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
 
-                // One-time safety net (first run) OR explicit debug toggle.
-                if enableShadowThisRun {
-                    await ensureUNAuth()
-                    await scheduleShadowBanner(for: id,
-                                               stack: stack,
-                                               step: step,
-                                               fireDate: Date().addingTimeInterval(TimeInterval(seconds)),
-                                               delaySeconds: Self.shadowDelaySeconds)
-                }
-
             } catch {
                 // Roll back anything we placed with AK, then UN fallback for the whole stack.
                 for u in akIDs { try? manager.cancel(id: u) }
@@ -124,10 +109,10 @@ final class AlarmKitScheduler: AlarmScheduling {
             }
         }
 
-        // Mark that we've scheduled with AK at least once (disables one-time shadow from now on).
+        // Mark that we've scheduled with AK at least once.
         if firstRun { hasScheduledOnceAK = true }
 
-        // Start/refresh LA & widget (safe no-op if disabled).
+        // Start/refresh Live Activity & widget
         await LiveActivityManager.start(for: stack, calendar: calendar)
 
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
@@ -138,7 +123,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         let key = storageKey(for: stack)
         for s in (defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) { try? manager.cancel(id: id) }
-            // Clean any pending/delivered shadow (if it existed)
+            // Cleanup old backup notifications if any still exist from prior builds.
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: ["shadow-\(s)"])
             center.removeDeliveredNotifications(withIdentifiers: ["shadow-\(s)"])
@@ -150,43 +135,6 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
-    }
-
-    // MARK: - Shadow UN banner (safety net)
-    private func ensureUNAuth() async {
-        let center = UNUserNotificationCenter.current()
-        let settings = await center.notificationSettings()
-        if settings.authorizationStatus == .notDetermined {
-            _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge, .providesAppNotificationSettings])
-        }
-    }
-
-    private func scheduleShadowBanner(for id: UUID,
-                                      stack: Stack,
-                                      step: Step,
-                                      fireDate: Date,
-                                      delaySeconds: Int) async {
-        let center = UNUserNotificationCenter.current()
-
-        let content = UNMutableNotificationContent()
-        content.title = stack.name
-        content.subtitle = step.title
-        content.body = "Backup alert in case the alarm UI didn’t appear."
-        content.sound = .default
-        content.interruptionLevel = .timeSensitive
-        content.categoryIdentifier = "ALARM_CATEGORY"
-        content.threadIdentifier = "ak-\(id.uuidString)"
-        content.userInfo = [
-            "stackID": stack.id.uuidString,
-            "stepID": step.id.uuidString,
-            "snoozeMinutes": step.snoozeMinutes,
-            "allowSnooze": step.allowSnooze
-        ]
-
-        let t = max(1, Int(ceil(fireDate.timeIntervalSinceNow))) + max(0, delaySeconds)
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(t), repeats: false)
-        let req = UNNotificationRequest(identifier: "shadow-\(id.uuidString)", content: content, trigger: trigger)
-        try? await center.add(req)
     }
 }
 
