@@ -66,6 +66,11 @@ struct AlarmStacksApp: App {
         // UN actions/categories for the fallback path and snooze/stop actions.
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
+        
+        UserDefaults.standard.register(defaults: [
+            "debug.forceUNFallback": true,     // ← default to UN path for reliability
+            "debug.liveActivitiesEnabled": true
+        ])
 
         // ✅ PRIME AlarmKit authorisation at app launch to avoid a first-run race.
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
