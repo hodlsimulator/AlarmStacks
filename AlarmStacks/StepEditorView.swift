@@ -78,8 +78,7 @@ struct StepEditorView: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    applyEdits()
-                    dismiss()
+                    applyEditsAndRescheduleIfNeeded()
                 }
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -109,7 +108,8 @@ struct StepEditorView: View {
         }
     }
 
-    private func applyEdits() {
+    private func applyEditsAndRescheduleIfNeeded() {
+        // 1) Apply edits to the model
         step.title = title
         step.kind = kind
         step.isEnabled = enabled
@@ -145,7 +145,18 @@ struct StepEditorView: View {
         step.allowSnooze = allowSnooze
         step.snoozeMinutes = snoozeMinutes
 
+        // 2) Save, then if the parent stack is armed, re-schedule that stack
         try? modelContext.save()
+
+        if let parent = step.stack, parent.isArmed {
+            Task { @MainActor in
+                _ = try? await AlarmScheduler.shared.schedule(stack: parent, calendar: .current)
+                try? modelContext.save()
+                dismiss()
+            }
+        } else {
+            dismiss()
+        }
     }
 
     private func formatSelectedDays(_ set: Set<Int>) -> String {

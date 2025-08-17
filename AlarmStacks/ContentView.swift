@@ -70,7 +70,7 @@ struct ContentView: View {
             .navigationDestination(for: Stack.self) { stack in
                 StackDetailView(stack: stack)
             }
-            // NEW: edit a step
+            // Edit a step
             .navigationDestination(for: Step.self) { step in
                 StepEditorView(step: step)
             }
@@ -416,7 +416,8 @@ private struct AddStackSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") {
-                        let s = Stack(name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Untitled" : name)
+                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
                         if addFirstStep {
                             let order = 0
                             let step: Step
@@ -445,7 +446,7 @@ private struct AddStackSheet: View {
                         onCreate(s)
                         dismiss()
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    // NOTE: do NOT disable when name is empty → we default to "Untitled"
                 }
             }
         }
