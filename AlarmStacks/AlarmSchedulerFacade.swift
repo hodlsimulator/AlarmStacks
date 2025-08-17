@@ -7,13 +7,16 @@
 
 import Foundation
 
-/// Unified access point so call sites can use `AlarmScheduler.shared` regardless of backend.
 enum AlarmScheduler {
-    static var shared: AlarmScheduling = {
+    private static var forceUNFallback: Bool {
+        UserDefaults.standard.bool(forKey: "debug.forceUNFallback")
+    }
+
+    static var shared: AlarmScheduling {
         #if canImport(AlarmKit)
-        return AlarmKitScheduler.shared
+        return forceUNFallback ? UserNotificationScheduler.shared : AlarmKitScheduler.shared
         #else
         return UserNotificationScheduler.shared
         #endif
-    }()
+    }
 }

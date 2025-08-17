@@ -47,6 +47,8 @@ enum LiveActivityManager {
     }
 
     static func start(for stack: Stack, calendar: Calendar = .current) async {
+        let laEnabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
+        guard laEnabled else { return }
         guard let info = nextStepInfo(for: stack, calendar: calendar) else { return }
 
         // Update widget bridge
