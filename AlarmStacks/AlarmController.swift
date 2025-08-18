@@ -36,7 +36,7 @@ final class AlarmController: ObservableObject {
         #endif
     }
 
-    // Observe AlarmKit; when alerting -> mark fired + compute delta for diagnostics
+    // Observe AlarmKit; when alerting -> cancel UN fallback + log deltas + freeze LA
     func startObserversIfNeeded() {
         #if canImport(AlarmKit)
         guard observerTask == nil else { return }
@@ -45,39 +45,50 @@ final class AlarmController: ObservableObject {
             for await snapshot in manager.alarmUpdates {
                 await MainActor.run {
                     self.lastSnapshot = snapshot
-
-                    // Snapshot summary (helps diagnose missing alerts)
-                    let counts = Dictionary(grouping: snapshot.map { String(describing: $0.state) }, by: { $0 })
-                        .mapValues(\.count)
-                        .map { "\($0.key)=\($0.value)" }
-                        .sorted()
-                        .joined(separator: ", ")
-                    DiagLog.log("AK snapshot size=\(snapshot.count) states{\(counts)}")
-
                     let newAlerting = snapshot.first(where: { $0.state == .alerting })
                     self.alertingAlarm = newAlerting
                     if let a = newAlerting {
-                        // Cancel any shadow (legacy safety; harmless if none exist).
                         let center = UNUserNotificationCenter.current()
+                        // Cancel any UN “shadow/fallback” for this AK id.
+                        let fid = "fallback-\(a.id.uuidString)"
                         let sid = "shadow-\(a.id.uuidString)"
-                        center.removePendingNotificationRequests(withIdentifiers: [sid])
-                        center.removeDeliveredNotifications(withIdentifiers: [sid])
+                        center.removePendingNotificationRequests(withIdentifiers: [fid, sid])
+                        center.removeDeliveredNotifications(withIdentifiers: [fid, sid])
 
-                        // Diagnostics: compute delta from expected time (if recorded).
+                        // Diagnostics: compute deltas.
                         let key = "ak.expected.\(a.id.uuidString)"
                         let ts = UserDefaults.standard.double(forKey: key)
-                        let appState = UIApplication.shared.applicationState
+                        let appStateDesc: String = {
+                            #if canImport(UIKit)
+                            let raw = UIApplication.shared.applicationState.rawValue
+                            return "UIApplicationState(rawValue: \(raw))"
+                            #else
+                            return "unknown"
+                            #endif
+                        }()
+
                         if ts > 0 {
                             let expected = Date(timeIntervalSince1970: ts)
-                            let delta = Date().timeIntervalSince(expected)
-                            DiagLog.log(String(format: "AK alerting id=%@ appState=%@ delta=%.1fs expected=%@",
-                                               a.id.uuidString, String(describing: appState), delta, expected.description))
+                            let wallDelta = Date().timeIntervalSince(expected)
+                            if let rec = AKDiag.load(id: a.id) {
+                                let upNow = ProcessInfo.processInfo.systemUptime
+                                let upDelta = upNow - rec.targetUptime
+                                DiagLog.log(String(
+                                    format: "AK alerting id=%@ appState=%@ wallΔ=%.3fs upΔ=%.3fs targetLocal=%@",
+                                    a.id.uuidString, appStateDesc, wallDelta, upDelta, DiagLog.f(expected)
+                                ))
+                                AKDiag.remove(id: a.id)
+                            } else {
+                                DiagLog.log(String(
+                                    format: "AK alerting id=%@ appState=%@ wallΔ=%.3fs targetLocal=%@",
+                                    a.id.uuidString, appStateDesc, wallDelta, DiagLog.f(expected)
+                                ))
+                            }
                             UserDefaults.standard.removeObject(forKey: key)
                         } else {
-                            DiagLog.log("AK alerting id=\(a.id.uuidString) (no expected fire time recorded)")
+                            DiagLog.log("AK alerting id=\(a.id.uuidString) appState=\(appStateDesc) (no expected fire time recorded)")
                         }
 
-                        // Tell Live Activity to freeze at fired time.
                         Task { await LiveActivityManager.markFiredNow() }
                     }
                 }
@@ -105,17 +116,16 @@ final class AlarmController: ObservableObject {
         #endif
     }
 
-    // MARK: - Diagnostics
-
+    // Diagnostics helper for the “Refresh” button.
     func auditAKNow() {
         #if canImport(AlarmKit)
-        let auth = String(describing: manager.authorizationState)
-        let counts = Dictionary(grouping: lastSnapshot.map { String(describing: $0.state) }, by: { $0 })
-            .mapValues(\.count)
+        let counts = Dictionary(grouping: lastSnapshot, by: { $0.state })
+            .mapValues { $0.count }
+        let summary = counts
             .map { "\($0.key)=\($0.value)" }
             .sorted()
-            .joined(separator: ", ")
-        DiagLog.log("AK audit auth=\(auth) snapshot=\(lastSnapshot.count) states{\(counts)}")
+            .joined(separator: " ")
+        DiagLog.log("AK snapshot size=\(lastSnapshot.count) states{\(summary)}")
         #endif
     }
 }

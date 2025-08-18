@@ -9,19 +9,30 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
+// MARK: - Diagnostics logging (local time + monotonic uptime)
+
+@MainActor
 enum DiagLog {
     private static let key = "diag.log.lines"
-    private static let maxLines = 400
+    private static let maxLines = 800
 
-    private static let iso: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
+    private static let local: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .iso8601)
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"   // local with offset, e.g. +01:00
+        f.timeZone = .current
         return f
     }()
 
-    /// Append a line.
+    /// Format a date in local time with offset.
+    static func f(_ date: Date) -> String { local.string(from: date) }
+
+    /// Append a line with a stable prelude: local timestamp + monotonic uptime.
     static func log(_ message: String) {
-        let line = "[\(iso.string(from: Date()))] \(message)"
+        let now = Date()
+        let up  = ProcessInfo.processInfo.systemUptime
+        let stamp = "\(local.string(from: now)) | up:\(String(format: "%.3f", up))s"
+        let line = "[\(stamp)] \(message)"
         var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
         lines.append(line)
         if lines.count > maxLines {
@@ -30,13 +41,8 @@ enum DiagLog {
         UserDefaults.standard.set(lines, forKey: key)
     }
 
-    static func read() -> [String] {
-        UserDefaults.standard.stringArray(forKey: key) ?? []
-    }
-
-    static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
-    }
+    static func read() -> [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
+    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
 
     /// UN summary (pending + delivered counts).
     static func auditUN() async {
@@ -46,6 +52,38 @@ enum DiagLog {
         log("UN audit pending=\(pending.count) delivered=\(delivered.count)")
     }
 }
+
+// MARK: - AlarmKit diagnostics record (persist target wall time + target uptime per id)
+
+@MainActor
+enum AKDiag {
+    private static func key(_ id: UUID) -> String { "ak.record.\(id.uuidString)" }
+
+    struct Record: Codable {
+        var stackName: String
+        var stepTitle: String
+        var scheduledAt: Date
+        var scheduledUptime: TimeInterval
+        var targetDate: Date
+        var targetUptime: TimeInterval
+        var seconds: Int
+    }
+
+    static func save(id: UUID, record: Record) {
+        if let data = try? JSONEncoder().encode(record) {
+            UserDefaults.standard.set(data, forKey: key(id))
+        }
+    }
+
+    static func load(id: UUID) -> Record? {
+        guard let data = UserDefaults.standard.data(forKey: key(id)) else { return nil }
+        return try? JSONDecoder().decode(Record.self, from: data)
+    }
+
+    static func remove(id: UUID) { UserDefaults.standard.removeObject(forKey: key(id)) }
+}
+
+// MARK: - UI: selectable/copyable diagnostics viewer
 
 struct DiagnosticsLogView: View {
     @State private var lines: [String] = DiagLog.read()

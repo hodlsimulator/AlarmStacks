@@ -8,6 +8,7 @@
 import SwiftUI
 import SwiftData
 import UserNotifications
+import AVFoundation
 
 @MainActor
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -22,6 +23,12 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         } else {
             DiagLog.log("UN willPresent id=\(id)")
         }
+
+        // Freeze Live Activity at the fired moment for UN-delivered alerts too.
+        if notification.request.content.categoryIdentifier == NotificationCategoryID.alarm {
+            Task { await LiveActivityManager.markFiredNow() }
+        }
+
         return [.banner, .sound, .list]
     }
 
@@ -41,9 +48,11 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let content = response.notification.request.content
         switch response.actionIdentifier {
         case NotificationActionID.snooze:
+            AuxSoundFallback.shared.stop()
             await scheduleSnooze(from: content)
 
         case NotificationActionID.stop, UNNotificationDismissActionIdentifier:
+            AuxSoundFallback.shared.stop()
             let thread = content.threadIdentifier
             let pending = await center.pendingNotificationRequests()
             let ids = pending.filter { $0.content.threadIdentifier == thread }.map(\.identifier)
