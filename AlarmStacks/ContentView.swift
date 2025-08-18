@@ -21,6 +21,9 @@ struct ContentView: View {
     @State private var showingAddStack = false
     @State private var showingSettings = false
 
+    // Prevent overlapping schedule/cancel on the same stack from different UI entry points
+    @State private var busyStacks: Set<UUID> = []
+
     var body: some View {
         NavigationStack {
             List {
@@ -53,7 +56,11 @@ struct ContentView: View {
                                 }
                             }
                             .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                Button { Task { await toggleArm(for: stack) } } label: {
+                                Button {
+                                    withGate(for: stack) {
+                                        await toggleArm(for: stack)
+                                    }
+                                } label: {
                                     Label(stack.isArmed ? "Disarm" : "Arm",
                                           systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
                                 }
@@ -102,8 +109,14 @@ struct ContentView: View {
     private func armAll() {
         Task { @MainActor in
             for s in stacks where !s.isArmed {
-                _ = try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)
-                s.isArmed = true
+                // Gate per stack to avoid overlapping operations initiated elsewhere
+                guard !busyStacks.contains(s.id) else { continue }
+                busyStacks.insert(s.id)
+                defer { busyStacks.remove(s.id) }
+
+                if (try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)) != nil {
+                    s.isArmed = true
+                }
             }
             try? modelContext.save()
         }
@@ -112,6 +125,10 @@ struct ContentView: View {
     private func disarmAll() {
         Task { @MainActor in
             for s in stacks where s.isArmed {
+                guard !busyStacks.contains(s.id) else { continue }
+                busyStacks.insert(s.id)
+                defer { busyStacks.remove(s.id) }
+
                 await AlarmScheduler.shared.cancelAll(for: s)
                 s.isArmed = false
             }
@@ -124,10 +141,9 @@ struct ContentView: View {
             await AlarmScheduler.shared.cancelAll(for: stack)
             stack.isArmed = false
         } else {
-            do {
-                _ = try await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)
+            if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)) != nil {
                 stack.isArmed = true
-            } catch {
+            } else {
                 stack.isArmed = false
             }
         }
@@ -135,8 +151,16 @@ struct ContentView: View {
     }
 
     private func delete(stack: Stack) {
-        modelContext.delete(stack)
-        try? modelContext.save()
+        // Ensure we cancel scheduled alarms before removing the model to avoid orphaned alerts
+        Task { @MainActor in
+            if !busyStacks.contains(stack.id) {
+                busyStacks.insert(stack.id)
+                defer { busyStacks.remove(stack.id) }
+                await AlarmScheduler.shared.cancelAll(for: stack)
+            }
+            modelContext.delete(stack)
+            try? modelContext.save()
+        }
     }
 
     private func addSampleStacks() {
@@ -170,6 +194,17 @@ struct ContentView: View {
             Step(title: "Break", kind: .timer, order: 3, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         ]
         return s
+    }
+
+    // MARK: - Simple per-stack gate
+
+    private func withGate(for stack: Stack, _ work: @escaping () async -> Void) {
+        guard !busyStacks.contains(stack.id) else { return }
+        busyStacks.insert(stack.id)
+        Task { @MainActor in
+            defer { busyStacks.remove(stack.id) }
+            await work()
+        }
     }
 }
 
@@ -281,20 +316,28 @@ private struct StackDetailView: View {
     @State private var calendar = Calendar.current
     @State private var showingAddSheet = false
 
+    // Local busy flag to avoid overlapping cancel/reschedule from detail screen
+    @State private var isBusy = false
+
     @Bindable var stack: Stack
 
     var body: some View {
         List {
             Section {
                 Toggle(isOn: Binding(get: { stack.isArmed }, set: { newVal in
-                    Task {
+                    guard !isBusy else { return }
+                    isBusy = true
+                    Task { @MainActor in
                         if newVal {
-                            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
+                            if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)) != nil {
+                                stack.isArmed = true
+                            }
                         } else {
                             await AlarmScheduler.shared.cancelAll(for: stack)
+                            stack.isArmed = false
                         }
-                        stack.isArmed = newVal
                         try? modelContext.save()
+                        isBusy = false
                     }
                 })) { Text("Armed") }
             }
@@ -307,11 +350,14 @@ private struct StackDetailView: View {
                     let snapshot = stack.sortedSteps
                     for i in idx { modelContext.delete(snapshot[i]) }
                     try? modelContext.save()
-                    // Auto-reschedule after deletion
-                    if stack.isArmed {
+
+                    // Auto-reschedule after deletion (guard against overlap)
+                    if stack.isArmed, !isBusy {
+                        isBusy = true
                         Task { @MainActor in
                             await AlarmScheduler.shared.cancelAll(for: stack)
                             _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
+                            isBusy = false
                         }
                     }
                 }

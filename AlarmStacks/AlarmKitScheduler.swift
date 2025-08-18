@@ -12,10 +12,6 @@ import SwiftData
 import SwiftUI
 import AlarmKit
 import os.log
-import UserNotifications
-#if canImport(ActivityKit)
-import ActivityKit
-#endif
 
 @MainActor
 final class AlarmKitScheduler: AlarmScheduling {
@@ -27,7 +23,8 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     // MARK: Tunables
     private static let minLeadSecondsFirst  = 45
-    private static let minLeadSecondsNormal = 12
+    private static let minLeadSecondsNormal = 20
+    private static let protectedWindowSecs  = 8
     private static let postAuthSettleMs: UInt64 = 800
 
     private var hasScheduledOnceAK: Bool {
@@ -61,58 +58,37 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-    // MARK: - Scheduling (AlarmKit timers for all steps; UN only if AK auth fails)
-    func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
-        let firstRunBeforeAuth = (hasScheduledOnceAK == false)
+    // MARK: - Scheduling (single AK timer per step)
 
-        do { try await requestAuthorizationIfNeeded() }
-        catch {
-            DiagLog.log("AK auth failed → UN fallback for stack \(stack.name)")
-            return try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
+    func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
+        try await requestAuthorizationIfNeeded()
+
+        // Don’t stomp a timer that’s about to fire.
+        if let imminent = nextEnabledStepFireDate(for: stack, calendar: calendar),
+           imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
+            DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
+            return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
-        if firstRunBeforeAuth {
-            // Small settle to avoid any post-permission race on first-ever schedule.
+        // First-auth UI jitter
+        if hasScheduledOnceAK == false {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
 
         await cancelAll(for: stack)
 
-        // Compute the first enabled step's fire date (for Live Activity kickoff + diagnostics).
-        var probeBase = Date()
-        var firstFireDate: Date?
-        var effectiveSecondsForFirst: Int?
-
-        for step in stack.sortedSteps where step.isEnabled {
-            let fireDate: Date
-            switch step.kind {
-            case .fixedTime:
-                fireDate = (try? step.nextFireDate(basedOn: Date(), calendar: calendar)) ?? Date().addingTimeInterval(3600)
-                probeBase = fireDate
-            case .timer, .relativeToPrev:
-                fireDate = (try? step.nextFireDate(basedOn: probeBase, calendar: calendar)) ?? Date().addingTimeInterval(3600)
-                probeBase = fireDate
-            }
-            firstFireDate = fireDate
-            let firstRun = (hasScheduledOnceAK == false)
-            let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
-            let raw = max(0, fireDate.timeIntervalSinceNow)
-            effectiveSecondsForFirst = max(minLead, Int(ceil(raw)))
-            break
-        }
-
-        DiagLog.log("AK decision ctx: forceUN=false alwaysAK=true firstRun=\(firstRunBeforeAuth) minLeadPref=0s effFirst=\(effectiveSecondsForFirst ?? -1)s")
-
-        // Ensure the Dynamic Island / Live Activity starts once we know the first target.
-        if let _ = firstFireDate {
-            await LiveActivityManager.start(for: stack, calendar: calendar)
-        }
-
-        // Use AlarmKit timers for every enabled step (convert fixed-time into a timer).
         var lastFireDate = Date()
         var akIDs: [UUID] = []
+
         let firstRun = (hasScheduledOnceAK == false)
         let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
+
+        // Log effective lead for the first enabled step
+        if let eff = effectiveLeadSeconds(for: stack, calendar: calendar, minLead: minLead) {
+            DiagLog.log("AK decision ctx: firstRun=\(firstRun) minLeadPref=0s effFirst=\(eff)s")
+        } else {
+            DiagLog.log("AK decision ctx: firstRun=\(firstRun) (no enabled steps)")
+        }
 
         for step in stack.sortedSteps where step.isEnabled {
             let fireDate: Date
@@ -125,67 +101,33 @@ final class AlarmKitScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
+            let now = Date()
+            let secondsRaw = max(0, fireDate.timeIntervalSince(now))
+            let seconds = max(minLead, Int(ceil(secondsRaw)))
+
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
 
             let id = UUID()
-            do {
-                let now = Date()
-                let nowUp = ProcessInfo.processInfo.systemUptime
-                let raw = max(0, fireDate.timeIntervalSinceNow)
-                let seconds = max(minLead, Int(ceil(raw)))
+            log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); target=\(fireDate as NSDate, privacy: .public)")
+            DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(DiagLog.f(fireDate))")
 
-                log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s — \(stack.name, privacy: .public) / \(step.title, privacy: .public)")
-                DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(DiagLog.f(fireDate))")
+            // Persist expected times for diagnostics
+            defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
 
-                // IMPORTANT: your AlarmKit build uses the .timer(duration:attributes:) signature.
-                let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
-                    .timer(duration: TimeInterval(seconds), attributes: attrs)
-                _ = try await manager.schedule(id: id, configuration: cfg)
-                akIDs.append(id)
+            // Single AK timer per step (no retries)
+            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
+                .timer(duration: TimeInterval(seconds), attributes: attrs)
+            _ = try await manager.schedule(id: id, configuration: cfg)
 
-                // Persist expected times (both clocks) for watchdog diagnostics.
-                defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
-                let rec = AKDiag.Record(
-                    stackName: stack.name,
-                    stepTitle: step.title,
-                    scheduledAt: now,
-                    scheduledUptime: nowUp,
-                    targetDate: fireDate,
-                    targetUptime: nowUp + TimeInterval(seconds),
-                    seconds: seconds
-                )
-                AKDiag.save(id: id, record: rec)
-
-                // Watchdog: if record still exists well after target, note a MISS.
-                let wait = seconds + 12 + 5
-                Task.detached { [id] in
-                    try? await Task.sleep(nanoseconds: UInt64(wait) * 1_000_000_000)
-                    await MainActor.run {
-                        if let rec2 = AKDiag.load(id: id) {
-                            let upStr = String(format: "%.3f", rec2.targetUptime)
-                            DiagLog.log("AK watchdog MISS id=\(id.uuidString) expectLocal=\(DiagLog.f(rec2.targetDate)) expectUp=\(upStr)s")
-                        }
-                    }
-                }
-
-            } catch {
-                // If AK scheduling fails, clean up and fall back to UN scheduling for this stack.
-                for u in akIDs { try? manager.cancel(id: u) }
-                DiagLog.log("AK schedule failed → UN fallback for \(stack.name)")
-                let ids = try await UserNotificationScheduler.shared.schedule(stack: stack, calendar: calendar)
-                await LiveActivityManager.start(for: stack, calendar: calendar)
-                return ids
-            }
+            akIDs.append(id)
         }
 
         if firstRun { hasScheduledOnceAK = true }
-
-        // Redundant safety to keep Live Activity alive.
-        await LiveActivityManager.start(for: stack, calendar: calendar)
-
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
+
+        await LiveActivityManager.start(for: stack, calendar: calendar)
         return akIDs.map(\.uuidString)
     }
 
@@ -195,22 +137,48 @@ final class AlarmKitScheduler: AlarmScheduling {
             if let id = UUID(uuidString: s) {
                 try? manager.cancel(id: id)
                 defaults.removeObject(forKey: expectedKey(for: id))
-                AKDiag.remove(id: id)
             }
-            // Clean up any legacy UN ids that might remain from past builds.
-            let center = UNUserNotificationCenter.current()
-            center.removePendingNotificationRequests(withIdentifiers: ["fallback-\(s)","shadow-\(s)"])
-            center.removeDeliveredNotifications(withIdentifiers: ["fallback-\(s)","shadow-\(s)"])
         }
         defaults.removeObject(forKey: key)
-
-        await UserNotificationScheduler.shared.cancelAll(for: stack)
     }
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
-        for s in stacks where s.isArmed {
-            _ = try? await schedule(stack: s, calendar: calendar)
+        for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
+    }
+
+    // MARK: Helpers
+
+    private func nextEnabledStepFireDate(for stack: Stack, calendar: Calendar) -> Date? {
+        var base = Date()
+        for step in stack.sortedSteps where step.isEnabled {
+            switch step.kind {
+            case .fixedTime:
+                if let d = try? step.nextFireDate(basedOn: Date(), calendar: calendar) { return d }
+                else { return nil }
+            case .timer, .relativeToPrev:
+                if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
+                else { return nil }
+            }
         }
+        return nil
+    }
+
+    private func effectiveLeadSeconds(for stack: Stack, calendar: Calendar, minLead: Int) -> Int? {
+        var probeBase = Date()
+        for step in stack.sortedSteps where step.isEnabled {
+            let fireDate: Date
+            switch step.kind {
+            case .fixedTime:
+                fireDate = (try? step.nextFireDate(basedOn: Date(), calendar: calendar)) ?? Date().addingTimeInterval(3600)
+                probeBase = fireDate
+            case .timer, .relativeToPrev:
+                fireDate = (try? step.nextFireDate(basedOn: probeBase, calendar: calendar)) ?? Date().addingTimeInterval(3600)
+                probeBase = fireDate
+            }
+            let raw = max(0, fireDate.timeIntervalSinceNow)
+            return max(minLead, Int(ceil(raw)))
+        }
+        return nil
     }
 }
 
@@ -222,19 +190,9 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
     let stop = AlarmButton(text: LocalizedStringResource("Stop"), textColor: .white, systemImageName: "stop.fill")
     if allowSnooze {
         let snooze = AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "zzz")
-        return AlarmPresentation.Alert(
-            title: title,
-            stopButton: stop,
-            secondaryButton: snooze,
-            secondaryButtonBehavior: .countdown
-        )
+        return AlarmPresentation.Alert(title: title, stopButton: stop, secondaryButton: snooze, secondaryButtonBehavior: .countdown)
     } else {
-        return AlarmPresentation.Alert(
-            title: title,
-            stopButton: stop,
-            secondaryButton: nil,
-            secondaryButtonBehavior: nil
-        )
+        return AlarmPresentation.Alert(title: title, stopButton: stop, secondaryButton: nil, secondaryButtonBehavior: nil)
     }
 }
 
