@@ -123,7 +123,23 @@ final class AlarmController: ObservableObject {
 
     func snooze(_ id: UUID) {
         #if canImport(AlarmKit)
-        try? manager.countdown(id: id)
+        // Silence the current ring immediately.
+        try? manager.stop(id: id)
+
+        // Read the per-alarm snooze settings we persisted when scheduling.
+        let ud = UserDefaults.standard
+        let minutes = max(1, ud.integer(forKey: "ak.snoozeMinutes.\(id.uuidString)"))
+        let stackName = ud.string(forKey: "ak.stackName.\(id.uuidString)") ?? "Alarm"
+        let stepTitle = ud.string(forKey: "ak.stepTitle.\(id.uuidString)") ?? "Snoozed"
+
+        Task {
+            _ = await AlarmKitScheduler.shared.scheduleSnooze(
+                baseAlarmID: id,
+                stackName: stackName,
+                stepTitle: stepTitle,
+                minutes: minutes
+            )
+        }
         #endif
     }
 
