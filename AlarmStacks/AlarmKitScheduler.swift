@@ -11,8 +11,11 @@ import Foundation
 import SwiftData
 import SwiftUI
 import AlarmKit
+#if canImport(ActivityKit)
+import ActivityKit
+#endif
 import os.log
-import UserNotifications
+import UserNotifications    
 
 @MainActor
 final class AlarmKitScheduler: AlarmScheduling {
@@ -69,7 +72,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
     }
 
-    // MARK: - Scheduling (AK timers for all steps; no shadows; no explicit sound)
+    // MARK: - Scheduling (AK timers for all steps; no shadows; explicit sound)
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         let firstRunBeforeAuth = (hasScheduledOnceAK == false)
 
@@ -132,12 +135,18 @@ final class AlarmKitScheduler: AlarmScheduling {
                 let now = Date()
                 let nowUp = ProcessInfo.processInfo.systemUptime
 
-                // Use a timer **even for fixed-time steps** — this path has proven to ring,
-                // whereas .alarm(.fixed) produced haptic-only in your testing.
+                // Use a timer **even for fixed-time steps** — this path has rung with banner/sound for you.
                 let raw = max(0, fireDate.timeIntervalSinceNow)
                 let seconds = max(minLead, Int(ceil(raw)))
+
                 let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
-                    .timer(duration: TimeInterval(seconds), attributes: attrs)
+                    .timer(
+                        duration: TimeInterval(seconds),
+                        attributes: attrs,
+                        stopIntent: nil,
+                        secondaryIntent: nil,
+                        sound: .default
+                    )
 
                 _ = try await manager.schedule(id: id, configuration: cfg)
                 akIDs.append(id)
@@ -216,4 +225,3 @@ private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<E
 }
 
 #endif
-
