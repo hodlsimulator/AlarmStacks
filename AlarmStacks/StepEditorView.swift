@@ -14,6 +14,8 @@ struct StepEditorView: View {
     @Bindable var step: Step
 
     @Environment(\.calendar) private var calendar
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
 
     // MARK: - Body
 
@@ -34,6 +36,14 @@ struct StepEditorView: View {
             }
 
             behaviourSection
+        }
+        .navigationTitle("Edit Step")
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") {
+                    Task { await saveAndReschedule() }
+                }
+            }
         }
     }
 
@@ -177,6 +187,21 @@ struct StepEditorView: View {
         }
     }
 
+    // MARK: - Save & reschedule
+
+    private func saveAndReschedule() async {
+        // Persist edits
+        try? modelContext.save()
+
+        // If this step's stack is armed, re-arm to apply changes immediately
+        if let stack = step.stack, stack.isArmed {
+            await AlarmScheduler.shared.cancelAll(for: stack)
+            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
+        }
+
+        dismiss()
+    }
+
     // MARK: - Helpers (time <-> hour/minute)
 
     private func timeFromHourMinute() -> Date {
@@ -311,56 +336,3 @@ private struct WeekdayChips: View {
         if selected.contains(n) { selected.remove(n) } else { selected.insert(n) }
     }
 }
-
-// MARK: - Preview
-
-#if DEBUG
-struct StepEditorView_Previews: PreviewProvider {
-    static var previews: some View {
-        let stepFixed = Step(
-            title: "Wake",
-            kind: .fixedTime,
-            order: 0,
-            hour: 6,
-            minute: 30,
-            weekdays: [2,3,4,5,6],
-            allowSnooze: true,
-            snoozeMinutes: 9
-        )
-
-        let stepTimer = Step(
-            title: "Coffee",
-            kind: .timer,
-            order: 1,
-            durationSeconds: 900,
-            allowSnooze: true,
-            snoozeMinutes: 5,
-            everyNDays: nil
-        )
-
-        let stepRel = Step(
-            title: "Shower",
-            kind: .relativeToPrev,
-            order: 2,
-            offsetSeconds: 300,
-            allowSnooze: true,
-            snoozeMinutes: 5
-        )
-
-        Group {
-            NavigationStack {
-                StepEditorView(step: stepFixed)
-                    .navigationTitle("Edit Step")
-            }
-            NavigationStack {
-                StepEditorView(step: stepTimer)
-                    .navigationTitle("Edit Step")
-            }
-            NavigationStack {
-                StepEditorView(step: stepRel)
-                    .navigationTitle("Edit Step")
-            }
-        }
-    }
-}
-#endif

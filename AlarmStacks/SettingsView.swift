@@ -23,12 +23,25 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+                
+                SoundSettingsSection()
 
                 // Appearance selector
                 AppearancePickerView()
 
                 // Debug toggles
                 DebugSettingsSection()
+                
+                Section("Alarm loudness") {
+                    Button("Ring a test alarm in 5 seconds") {
+                        Task { _ = await AlarmKitScheduler.shared.scheduleTestRing(in: 5) }
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Text("Alarms use your iPhone’s **Ringer & Alerts** volume. To keep them loud, raise the slider in **Settings → Sounds & Haptics** and consider turning **Change with Buttons** off so accidental button presses don’t lower it. If alarms seem to fade when you look at the phone, turn off **Attention Aware Features** in **Settings → Face ID & Attention**.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
                 // Single diagnostics entry (kept inside the Form so we don’t duplicate it)
                 Section("Diagnostics") {

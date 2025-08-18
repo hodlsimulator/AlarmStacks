@@ -11,6 +11,7 @@ import Foundation
 import SwiftData
 import SwiftUI
 import AlarmKit
+import ActivityKit
 import os.log
 
 @MainActor
@@ -27,6 +28,8 @@ final class AlarmKitScheduler: AlarmScheduling {
     private static let protectedWindowSecs  = 8
     private static let postAuthSettleMs: UInt64 = 800
 
+    private static let defaultSoundFilename: String? = nil
+
     private var hasScheduledOnceAK: Bool {
         get { defaults.bool(forKey: "ak.hasScheduledOnce") }
         set { defaults.set(newValue, forKey: "ak.hasScheduledOnce") }
@@ -37,6 +40,7 @@ final class AlarmKitScheduler: AlarmScheduling {
     private func storageKey(for stack: Stack) -> String { "alarmkit.ids.\(stack.id.uuidString)" }
     private func expectedKey(for id: UUID) -> String { "ak.expected.\(id.uuidString)" }
     private func snoozeMapKey(for base: UUID) -> String { "ak.snooze.map.\(base.uuidString)" }
+    private func soundKey(for id: UUID) -> String { "ak.soundName.\(id.uuidString)" }
 
     // MARK: - Permissions
 
@@ -109,22 +113,31 @@ final class AlarmKitScheduler: AlarmScheduling {
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert)
+            let sound  = resolveSound(forStepName: step.soundName)
 
             let id = UUID()
             log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); target=\(fireDate as NSDate, privacy: .public)")
             DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(DiagLog.f(fireDate))")
 
-            // Persist expected times for diagnostics
+            // Persist expected time & sound for diagnostics/snooze
             defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
-
-            // Store snooze metadata so a later snooze can recreate a matching alert
+            if let n = step.soundName, !n.isEmpty {
+                defaults.set(n, forKey: soundKey(for: id))
+            } else if let n = Self.defaultSoundFilename {
+                defaults.set(n, forKey: soundKey(for: id))
+            }
             defaults.set(step.snoozeMinutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stack.name,        forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(step.title,        forKey: "ak.stepTitle.\(id.uuidString)")
 
             // Single AK timer per step (no retries)
-            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
-                .timer(duration: TimeInterval(seconds), attributes: attrs)
+            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
+                duration: TimeInterval(seconds),
+                attributes: attrs,
+                stopIntent: nil,
+                secondaryIntent: nil,
+                sound: sound
+            )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
             akIDs.append(id)
@@ -152,11 +165,9 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
     }
 
-    // MARK: - AlarmKit Snooze (timer-based, no UN)
+    // MARK: - AlarmKit Snooze (timer-based; no UN)
 
     /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
-    /// - Important: This cancels any prior snooze tied to `baseAlarmID` so there’s never more than one active snooze.
-    /// - Returns: The new snooze alarm UUID string, or nil on failure.
     @discardableResult
     func scheduleSnooze(
         baseAlarmID: UUID,
@@ -164,7 +175,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         stepTitle: String,
         minutes: Int
     ) async -> String? {
-        // Cancel an existing snooze for this base alarm, if any.
+        // Cancel existing snooze for this base alarm, if any.
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
            let existingID = UUID(uuidString: existing) {
             try? manager.cancel(id: existingID)
@@ -180,17 +191,27 @@ final class AlarmKitScheduler: AlarmScheduling {
         let alert = makeAlert(title: title, allowSnooze: true)
         let attrs = makeAttributes(alert: alert)
 
+        // Carry over original sound if present; otherwise default.
+        let carriedName = defaults.string(forKey: soundKey(for: baseAlarmID))
+        let sound = resolveSound(forStepName: carriedName)
+
         do {
-            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
-                .timer(duration: TimeInterval(seconds), attributes: attrs)
+            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
+                duration: TimeInterval(seconds),
+                attributes: attrs,
+                stopIntent: nil,
+                secondaryIntent: nil,
+                sound: sound
+            )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
-            // Persist diagnostics + mapping so we can compute deltas and chain snoozes.
+            // Persist diagnostics + mapping for chained snoozes.
             defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
             defaults.set(id.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
             defaults.set(minutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stackName, forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(stepTitle, forKey: "ak.stepTitle.\(id.uuidString)")
+            if let n = carriedName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
 
             DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; target=\(DiagLog.f(target))")
             return id.uuidString
@@ -251,6 +272,60 @@ final class AlarmKitScheduler: AlarmScheduling {
         defaults.removeObject(forKey: "ak.snoozeMinutes.\(id.uuidString)")
         defaults.removeObject(forKey: "ak.stackName.\(id.uuidString)")
         defaults.removeObject(forKey: "ak.stepTitle.\(id.uuidString)")
+        defaults.removeObject(forKey: soundKey(for: id))
+    }
+
+    // Decide which sound to use: always system default (loops indefinitely)
+    private func resolveSound(forStepName name: String?) -> AlertConfiguration.AlertSound {
+        .default
+    }
+
+    // Verifies that the audio file is actually present in the app bundle
+    private func resourceExists(named filename: String) -> Bool {
+        let ns = filename as NSString
+        let name = ns.deletingPathExtension
+        let ext  = ns.pathExtension
+        return Bundle.main.url(forResource: name, withExtension: ext) != nil
+    }
+    
+    // MARK: - Test ring (AlarmKit-only)
+
+    @discardableResult
+    func scheduleTestRing(in seconds: Int = 5) async -> String? {
+        do {
+            try await requestAuthorizationIfNeeded()
+
+            let id = UUID()
+            let delay = max(1, seconds)
+            let target = Date().addingTimeInterval(TimeInterval(delay))
+
+            let title: LocalizedStringResource = LocalizedStringResource("Test Alarm")
+            let alert = makeAlert(title: title, allowSnooze: false)
+            let attrs = makeAttributes(alert: alert)
+
+            // Use explicit step sound if provided in future, else app default, else system default.
+            let sound = resolveSound(forStepName: nil)
+
+            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
+                duration: TimeInterval(delay),
+                attributes: attrs,
+                stopIntent: nil,
+                secondaryIntent: nil,
+                sound: sound
+            )
+
+            _ = try await manager.schedule(id: id, configuration: cfg)
+
+            // Diagnostics for delta logging
+            defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
+            if let def = Self.defaultSoundFilename { defaults.set(def, forKey: soundKey(for: id)) }
+
+            DiagLog.log("AK test schedule id=\(id.uuidString) in \(delay)s; target=\(DiagLog.f(target))")
+            return id.uuidString
+        } catch {
+            DiagLog.log("AK test schedule FAILED error=\(error)")
+            return nil
+        }
     }
 }
 
