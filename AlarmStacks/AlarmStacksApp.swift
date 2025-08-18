@@ -27,8 +27,6 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         // Freeze Live Activity at the fired moment for UN-delivered alerts too.
         if notification.request.content.categoryIdentifier == NotificationCategoryID.alarm {
             Task { await LiveActivityManager.markFiredNow() }
-            // IMPORTANT: when the app is foreground, don’t also show a regular UN banner for alarms.
-            // We rely on AlarmKit + our overlay; showing UN here can result in the “single buzz” race.
             return []
         }
 
@@ -100,9 +98,7 @@ struct AlarmStacksApp: App {
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
 
-        // Request AlarmKit/notifications auth ASAP so we’re fully authorized well
-        // before the first schedule. Doing this here (instead of a .task on the view)
-        // removes a subtle race on cold launch.
+        // Request AlarmKit/notifications auth ASAP.
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
     }
 
@@ -112,6 +108,7 @@ struct AlarmStacksApp: App {
                 .alarmStopOverlay()
                 .background(ForegroundRearmCoordinator())
                 .preferredAppearance()
+                .appTint() // ← apply selected theme tint
                 .onOpenURL { DeepLinks.handle($0) }
         }
         .modelContainer(for: [Stack.self, Step.self])

@@ -10,10 +10,34 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var settings = Settings.shared
+    @StateObject private var store = Store.shared
+    @State private var showingPaywall = false
 
     var body: some View {
         NavigationStack {
             Form {
+                // Premium / Plus
+                Section {
+                    HStack {
+                        Label(store.isPlus ? "AlarmStacks Plus" : "Get AlarmStacks Plus", systemImage: store.isPlus ? "star.fill" : "star")
+                            .foregroundStyle(store.isPlus ? .yellow : .primary)
+                        Spacer()
+                        if !store.isPlus {
+                            Button("Learn more") { showingPaywall = true }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Text("Active").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                // Themes (tint colour only; Plus unlocks extra themes)
+                ThemePickerView()
+
+                // Appearance selector (light/dark/system)
+                AppearancePickerView()
+
+                // Defaults for new steps
                 Section("Defaults for new steps") {
                     Toggle("Allow Snooze", isOn: $settings.defaultAllowSnooze)
                     Stepper(value: $settings.defaultSnoozeMinutes, in: 1...30) {
@@ -23,15 +47,14 @@ struct SettingsView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                
-                SoundSettingsSection()
 
-                // Appearance selector
-                AppearancePickerView()
+                // Sound choice & test ring (UI only; uses system sound by default)
+                SoundSettingsSection()
 
                 // Debug toggles
                 DebugSettingsSection()
-                
+
+                // Alarm loudness guidance
                 Section("Alarm loudness") {
                     Button("Ring a test alarm in 5 seconds") {
                         Task { _ = await AlarmKitScheduler.shared.scheduleTestRing(in: 5) }
@@ -43,7 +66,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Single diagnostics entry (kept inside the Form so we don’t duplicate it)
+                // Diagnostics
                 Section("Diagnostics") {
                     NavigationLink("Diagnostics Log") { DiagnosticsLogView() }
                 }
@@ -53,6 +76,11 @@ struct SettingsView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .task { await store.load() }
+            .sheet(isPresented: $showingPaywall) {
+                PaywallView()
+                    .presentationDetents([.medium, .large])
             }
         }
     }

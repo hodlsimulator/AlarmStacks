@@ -393,7 +393,7 @@ private struct StepRow: View {
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
-    private func detailText(for step: Step) -> String {
+    private func detailText(for: Step) -> String {
         switch step.kind {
         case .fixedTime:
             var time = "Fixed"
@@ -448,9 +448,14 @@ private struct AddStackSheet: View {
 
     @State private var addFirstStep = true
     @State private var firstStepKind: StepKind = .fixedTime
-    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
-    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
+
+    // Unified time-of-day picker
+    @State private var firstStepTime: Date = Date()
+
+    // Duration / After previous (shared UI style)
+    @State private var direction: Direction = .after
     @State private var minutesAmount: Int = 10
+    @State private var secondsAmount: Int = 0
 
     var body: some View {
         NavigationStack {
@@ -466,11 +471,28 @@ private struct AddStackSheet: View {
                             Text("Timer").tag(StepKind.timer)
                             Text("After previous").tag(StepKind.relativeToPrev)
                         }
-                        if firstStepKind == .fixedTime {
-                            Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
-                            Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
-                        } else {
-                            Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
+                        .pickerStyle(.segmented)
+
+                        switch firstStepKind {
+                        case .fixedTime:
+                            DatePicker("Time", selection: $firstStepTime, displayedComponents: .hourAndMinute)
+                                .datePickerStyle(.compact)
+
+                        case .timer:
+                            durationEditors
+
+                        case .relativeToPrev:
+                            Picker("Direction", selection: $direction) {
+                                Text("After").tag(Direction.after)
+                                Text("Before").tag(Direction.before)
+                            }
+                            .pickerStyle(.segmented)
+                            durationEditors
+
+                            Text(humanReadableRelative)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 2)
                         }
                     }
                 }
@@ -489,26 +511,30 @@ private struct AddStackSheet: View {
                             let step: Step
                             switch firstStepKind {
                             case .fixedTime:
+                                let comps = Calendar.current.dateComponents([.hour, .minute], from: firstStepTime)
                                 step = Step(title: "Wake",
                                             kind: .fixedTime,
                                             order: order,
-                                            hour: hour, minute: minute,
+                                            hour: comps.hour, minute: comps.minute,
                                             allowSnooze: def.defaultAllowSnooze,
                                             snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
                             case .timer:
+                                let secs = max(1, totalSeconds)
                                 step = Step(title: "Timer",
                                             kind: .timer,
                                             order: order,
-                                            durationSeconds: minutesAmount * 60,
+                                            durationSeconds: secs,
                                             allowSnooze: def.defaultAllowSnooze,
                                             snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
                             case .relativeToPrev:
+                                let secs = max(0, totalSeconds)
+                                let signed = (direction == .after ? 1 : -1) * secs
                                 step = Step(title: "After previous",
                                             kind: .relativeToPrev,
                                             order: order,
-                                            offsetSeconds: minutesAmount * 60,
+                                            offsetSeconds: signed,
                                             allowSnooze: def.defaultAllowSnooze,
                                             snoozeMinutes: def.defaultSnoozeMinutes,
                                             stack: s)
@@ -519,10 +545,68 @@ private struct AddStackSheet: View {
                         onCreate(s)
                         dismiss()
                     }
-                    // Keep enabled even when name empty → defaults to "Untitled"
+                    .disabled(addFirstStep && (firstStepKind != .fixedTime && totalSeconds == 0))
                 }
             }
         }
+    }
+
+    // MARK: - Subviews (shared with AddStepSheet below)
+
+    private var durationEditors: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent("Duration") {
+                Text(formatted(totalSeconds))
+                    .monospacedDigit()
+            }
+            HStack {
+                Stepper(value: $minutesAmount, in: 0...720) {
+                    Text("Minutes: \(minutesAmount)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Stepper(value: $secondsAmount, in: 0...59) {
+                    Text("Seconds: \(secondsAmount)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .labelStyle(.titleOnly)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var totalSeconds: Int {
+        max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
+    }
+
+    private var humanReadableRelative: String {
+        let s = totalSeconds
+        guard s > 0 else { return "No delay" }
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        let sec = s % 60
+
+        let dur: String = {
+            if h > 0 { return "\(h)h \(m)m" }
+            if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
+            if m > 0 { return "\(m)m" }
+            return "\(sec)s"
+        }()
+
+        return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
+    }
+
+    // MARK: - Types
+
+    private enum Direction { case after, before }
+
+    private func formatted(_ seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m \(s)s" }
+        if m > 0 { return s > 0 ? "\(m)m \(s)s" : "\(m)m" }
+        return "\(s)s"
     }
 }
 
@@ -535,9 +619,8 @@ private struct AddStepSheet: View {
     @State private var title: String = ""
     @State private var kind: StepKind = .fixedTime
 
-    // Fixed time
-    @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
-    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
+    // Fixed time (unified DatePicker)
+    @State private var timeOfDay: Date = Date()
 
     // Duration / After previous
     @State private var direction: Direction = .after
@@ -559,16 +642,17 @@ private struct AddStepSheet: View {
                     .pickerStyle(.segmented)
                 }
 
-                if kind == .fixedTime {
+                switch kind {
+                case .fixedTime:
                     Section("Time") {
-                        Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
-                        Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
+                        DatePicker("Time", selection: $timeOfDay, displayedComponents: .hourAndMinute)
+                            .datePickerStyle(.compact)
                     }
-                } else if kind == .timer {
+                case .timer:
                     Section("Duration") {
                         durationEditors
                     }
-                } else if kind == .relativeToPrev {
+                case .relativeToPrev:
                     Section("After previous") {
                         Picker("Direction", selection: $direction) {
                             Text("After").tag(Direction.after)
@@ -602,7 +686,7 @@ private struct AddStepSheet: View {
 
     private var durationEditors: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Length") {
+            LabeledContent("Duration") {
                 Text(formatted(totalSeconds))
                     .monospacedDigit()
             }
@@ -659,11 +743,12 @@ private struct AddStepSheet: View {
         let step: Step
         switch kind {
         case .fixedTime:
+            let comps = Calendar.current.dateComponents([.hour, .minute], from: timeOfDay)
             step = Step(title: safeTitle,
                         kind: .fixedTime,
                         order: order,
-                        hour: hour,
-                        minute: minute,
+                        hour: comps.hour,
+                        minute: comps.minute,
                         allowSnooze: def.defaultAllowSnooze,
                         snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
