@@ -8,204 +8,359 @@
 import SwiftUI
 import SwiftData
 
+@MainActor
 struct StepEditorView: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
 
     @Bindable var step: Step
 
-    @State private var title: String = ""
-    @State private var kind: StepKind = .fixedTime
-    @State private var hour: Int = Calendar.current.component(.hour, from: Date())
-    @State private var minute: Int = Calendar.current.component(.minute, from: Date())
-    @State private var minutesAmount: Int = 10
-    @State private var allowSnooze: Bool = true
-    @State private var snoozeMinutes: Int = 9
-    @State private var enabled: Bool = true
+    @Environment(\.calendar) private var calendar
 
-    // Weekday multi-select for fixed-time (1...7, Sun=1)
-    @State private var weekdaySelection: Set<Int> = []
+    // MARK: - Body
 
     var body: some View {
         Form {
-            Section("Basics") {
-                TextField("Title", text: $title)
-                Toggle("Enabled", isOn: $enabled)
-                Picker("Kind", selection: $kind) {
-                    Text("Fixed time").tag(StepKind.fixedTime)
-                    Text("Timer").tag(StepKind.timer)
-                    Text("After previous").tag(StepKind.relativeToPrev)
-                }
+            basicsSection
+            kindSection
+
+            switch step.kind {
+            case .fixedTime:
+                fixedTimeSection
+                weekdaysSection
+            case .timer:
+                timerSection
+                cadenceSection
+            case .relativeToPrev:
+                afterPreviousSection
             }
 
-            if kind == .fixedTime {
-                Section("Time") {
-                    Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
-                    Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
-                }
+            behaviourSection
+        }
+    }
 
-                Section("Repeat on") {
-                    WeekdayPicker(selection: $weekdaySelection)
-                    if !weekdaySelection.isEmpty {
-                        Text("Selected: \(formatSelectedDays(weekdaySelection))")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("No days selected → runs on the next day at the chosen time.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+    // MARK: - Sections
+
+    private var basicsSection: some View {
+        Section("Basics") {
+            TextField("Title", text: $step.title)
+                .textInputAutocapitalization(.words)
+                .disableAutocorrection(true)
+
+            Toggle("Enabled", isOn: $step.isEnabled)
+        }
+    }
+
+    private var kindSection: some View {
+        Section("Step type") {
+            Picker("Type", selection: $step.kind) {
+                Text("Fixed time").tag(StepKind.fixedTime)
+                Text("Timer").tag(StepKind.timer)
+                Text("After previous").tag(StepKind.relativeToPrev)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var fixedTimeSection: some View {
+        Section("Fixed time") {
+            DatePicker(
+                "Time",
+                selection: Binding<Date>(
+                    get: { timeFromHourMinute() },
+                    set: { setHourMinute(from: $0) }
+                ),
+                displayedComponents: .hourAndMinute
+            )
+            .datePickerStyle(.compact)
+        }
+    }
+
+    private var weekdaysSection: some View {
+        Section {
+            WeekdayChips(selected: Binding(
+                get: { Set(step.weekdays ?? []) },
+                set: { new in
+                    let sorted = Array(new).sorted()
+                    step.weekdays = sorted.isEmpty ? [] : sorted
+                    // Legacy single weekday should not override a multi-select UI
+                    step.weekday = nil
+                }
+            ))
+        } header: {
+            Text("Repeat on")
+        } footer: {
+            Text("Leave all off to allow any day.")
+        }
+    }
+
+    private var timerSection: some View {
+        Section("Timer") {
+            DurationEditor(
+                label: "Duration",
+                seconds: Binding(
+                    get: { max(1, step.durationSeconds ?? 60) },
+                    set: { step.durationSeconds = max(1, $0) }
+                )
+            )
+        }
+    }
+
+    private var cadenceSection: some View {
+        Section("Every N days (optional)") {
+            Toggle(isOn: Binding<Bool>(
+                get: { (step.everyNDays ?? 0) > 1 },
+                set: { on in
+                    step.everyNDays = on ? max(2, step.everyNDays ?? 2) : nil
+                }
+            )) {
+                Text("Gate timer to a day cadence")
+            }
+
+            if (step.everyNDays ?? 0) > 1 {
+                Stepper(value: Binding(
+                    get: { max(2, step.everyNDays ?? 2) },
+                    set: { step.everyNDays = max(2, $0) }
+                ), in: 2...365) {
+                    Text("Every \(step.everyNDays ?? 2) days")
+                }
+            }
+        }
+    }
+
+    private var afterPreviousSection: some View {
+        Section("After previous") {
+            // Direction: After / Before
+            Picker("Direction", selection: Binding<Direction>(
+                get: { (step.offsetSeconds ?? 60) >= 0 ? .after : .before },
+                set: { dir in
+                    let mag = abs(step.offsetSeconds ?? 60)
+                    step.offsetSeconds = dir == .after ? mag : -mag
+                }
+            )) {
+                Text("After").tag(Direction.after)
+                Text("Before").tag(Direction.before)
+            }
+            .pickerStyle(.segmented)
+
+            // Delay amount
+            DurationEditor(
+                label: "Delay",
+                seconds: Binding(
+                    get: { abs(step.offsetSeconds ?? 60) },
+                    set: { newValue in
+                        let sign = (step.offsetSeconds ?? 60) >= 0 ? 1 : -1
+                        step.offsetSeconds = sign * max(0, newValue)
                     }
-                }
-            } else if kind == .timer {
-                Section("Duration") {
-                    Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
-                }
-            } else {
-                Section("Offset") {
-                    Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
-                }
-            }
+                )
+            )
 
-            Section("Behaviour") {
-                Toggle("Allow Snooze", isOn: $allowSnooze)
-                Stepper(value: $snoozeMinutes, in: 1...30) { Text("Snooze Minutes: \(snoozeMinutes)") }
-            }
-        }
-        .navigationTitle("Edit Step")
-        .toolbar {
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") { dismiss() }
-            }
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
-                    applyEditsAndRescheduleIfNeeded()
-                }
-                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
-        .onAppear { seedFromModel() }
-    }
-
-    private func seedFromModel() {
-        title = step.title
-        kind = step.kind
-        enabled = step.isEnabled
-        hour = step.hour ?? hour
-        minute = step.minute ?? minute
-
-        if let s = step.durationSeconds { minutesAmount = max(1, s / 60) }
-        if let o = step.offsetSeconds { minutesAmount = max(1, abs(o) / 60) }
-
-        allowSnooze = step.allowSnooze
-        snoozeMinutes = step.snoozeMinutes
-
-        if let multi = step.weekdays, !multi.isEmpty {
-            weekdaySelection = Set(multi)
-        } else if let one = step.weekday {
-            weekdaySelection = [one]
-        } else {
-            weekdaySelection = []
+            // Friendly phrase
+            Text(relativePhrase(seconds: step.offsetSeconds ?? 60))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
+                .accessibilityLabel("Human-readable delay")
         }
     }
 
-    private func applyEditsAndRescheduleIfNeeded() {
-        // 1) Apply edits to the model
-        step.title = title
-        step.kind = kind
-        step.isEnabled = enabled
+    private var behaviourSection: some View {
+        Section("Behaviour") {
+            Toggle("Allow snooze", isOn: $step.allowSnooze)
 
-        switch kind {
-        case .fixedTime:
-            step.hour = hour
-            step.minute = minute
-            step.durationSeconds = nil
-            step.offsetSeconds = nil
-
-            let sortedDays = weekdaySelection.sorted()
-            step.weekdays = sortedDays.isEmpty ? nil : sortedDays
-            step.weekday = sortedDays.count == 1 ? sortedDays.first : nil
-
-        case .timer:
-            step.durationSeconds = minutesAmount * 60
-            step.offsetSeconds = nil
-            step.hour = nil
-            step.minute = nil
-            step.weekdays = nil
-            step.weekday = nil
-
-        case .relativeToPrev:
-            step.offsetSeconds = minutesAmount * 60
-            step.durationSeconds = nil
-            step.hour = nil
-            step.minute = nil
-            step.weekdays = nil
-            step.weekday = nil
-        }
-
-        step.allowSnooze = allowSnooze
-        step.snoozeMinutes = snoozeMinutes
-
-        // 2) Save, then if the parent stack is armed, re-schedule that stack
-        try? modelContext.save()
-
-        if let parent = step.stack, parent.isArmed {
-            Task { @MainActor in
-                _ = try? await AlarmScheduler.shared.schedule(stack: parent, calendar: .current)
-                try? modelContext.save()
-                dismiss()
+            Stepper(value: $step.snoozeMinutes, in: 1...30) {
+                if step.snoozeMinutes == 1 {
+                    Text("Snooze for 1 minute")
+                } else {
+                    Text("Snooze for \(step.snoozeMinutes) minutes")
+                }
             }
-        } else {
-            dismiss()
+            .disabled(!step.allowSnooze)
         }
     }
 
-    private func formatSelectedDays(_ set: Set<Int>) -> String {
-        let order = [2,3,4,5,6,7,1] // Mon..Sun
-        let map = [1:"Sun",2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat"]
-        let picked = order.filter { set.contains($0) }.compactMap { map[$0] }
-        return picked.joined(separator: " ")
+    // MARK: - Helpers (time <-> hour/minute)
+
+    private func timeFromHourMinute() -> Date {
+        let h = step.hour ?? 7
+        let m = step.minute ?? 0
+        return calendar.date(bySettingHour: h, minute: m, second: 0, of: Date()) ?? Date()
+    }
+
+    private func setHourMinute(from date: Date) {
+        let comps = calendar.dateComponents([.hour, .minute], from: date)
+        step.hour = comps.hour
+        step.minute = comps.minute
+    }
+
+    // MARK: - Friendly phrasing
+
+    private func relativePhrase(seconds: Int) -> String {
+        let value = seconds
+        let s = abs(value)
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        let sec = s % 60
+
+        let dur: String = {
+            if h > 0 { return "\(h)h \(m)m" }
+            if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
+            if m > 0 { return "\(m)m" }
+            return "\(sec)s"
+        }()
+
+        return value >= 0 ? "\(dur) after previous" : "\(dur) before previous"
     }
 }
 
-// MARK: - WeekdayPicker (chips)
+// MARK: - Direction
 
-private struct WeekdayPicker: View {
-    @Binding var selection: Set<Int> // 1...7 (Sun=1)
+private enum Direction: Hashable {
+    case after
+    case before
+}
 
-    private func chip(_ id: Int, _ title: String) -> some View {
-        let isOn = selection.contains(id)
-        return Button {
-            if isOn { selection.remove(id) } else { selection.insert(id) }
-        } label: {
-            Text(title)
-                .font(.caption)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background {
-                    if isOn {
-                        Capsule().fill(Color.accentColor.opacity(0.2))
-                    } else {
-                        Capsule().fill(.thinMaterial)
-                    }
-                }
-                .overlay(
-                    Capsule().stroke(isOn ? Color.accentColor : .clear, lineWidth: 1)
-                )
-        }
-        .buttonStyle(.plain)
-    }
+// MARK: - DurationEditor
+
+private struct DurationEditor: View {
+    let label: String
+    @Binding var seconds: Int
 
     var body: some View {
-        HStack(spacing: 8) {
-            chip(2, "Mon")
-            chip(3, "Tue")
-            chip(4, "Wed")
-            chip(5, "Thu")
-            chip(6, "Fri")
-            chip(7, "Sat")
-            chip(1, "Sun")
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent(label) {
+                Text(formatted(seconds: seconds))
+                    .monospacedDigit()
+            }
+
+            HStack {
+                Stepper(value: Binding(
+                    get: { seconds / 60 },
+                    set: { mins in
+                        let secs = seconds % 60
+                        seconds = max(0, mins) * 60 + secs
+                    }
+                ), in: 0...720) {
+                    Text("Minutes: \(seconds / 60)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Stepper(value: Binding(
+                    get: { seconds % 60 },
+                    set: { s in
+                        let mins = seconds / 60
+                        seconds = mins * 60 + max(0, min(59, s))
+                    }
+                ), in: 0...59) {
+                    Text("Seconds: \(seconds % 60)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .labelStyle(.titleOnly)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 4)
+    }
+
+    private func formatted(seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m \(s)s" }
+        if m > 0 { return s > 0 ? "\(m)m \(s)s" : "\(m)m" }
+        return "\(s)s"
     }
 }
+
+// MARK: - Weekday chips
+
+private struct WeekdayChips: View {
+    @Binding var selected: Set<Int> // 1...7, Sunday = 1
+
+    private let days: [(num: Int, short: String)] = [
+        (1, "Sun"), (2, "Mon"), (3, "Tue"), (4, "Wed"),
+        (5, "Thu"), (6, "Fri"), (7, "Sat")
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(days, id: \.num) { d in
+                    Button {
+                        toggle(d.num)
+                    } label: {
+                        Text(d.short)
+                            .font(.subheadline)
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 10)
+                            .background(selected.contains(d.num) ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12))
+                            .foregroundStyle(selected.contains(d.num) ? .primary : .secondary)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button("Clear") { selected.removeAll() }
+                Button("Weekdays") { selected = [2,3,4,5,6] }
+                Button("Weekends") { selected = [1,7] }
+            }
+            .font(.footnote)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func toggle(_ n: Int) {
+        if selected.contains(n) { selected.remove(n) } else { selected.insert(n) }
+    }
+}
+
+// MARK: - Preview
+
+#if DEBUG
+struct StepEditorView_Previews: PreviewProvider {
+    static var previews: some View {
+        let stepFixed = Step(
+            title: "Wake",
+            kind: .fixedTime,
+            order: 0,
+            hour: 6,
+            minute: 30,
+            weekdays: [2,3,4,5,6],
+            allowSnooze: true,
+            snoozeMinutes: 9
+        )
+
+        let stepTimer = Step(
+            title: "Coffee",
+            kind: .timer,
+            order: 1,
+            durationSeconds: 900,
+            allowSnooze: true,
+            snoozeMinutes: 5,
+            everyNDays: nil
+        )
+
+        let stepRel = Step(
+            title: "Shower",
+            kind: .relativeToPrev,
+            order: 2,
+            offsetSeconds: 300,
+            allowSnooze: true,
+            snoozeMinutes: 5
+        )
+
+        Group {
+            NavigationStack {
+                StepEditorView(step: stepFixed)
+                    .navigationTitle("Edit Step")
+            }
+            NavigationStack {
+                StepEditorView(step: stepTimer)
+                    .navigationTitle("Edit Step")
+            }
+            NavigationStack {
+                StepEditorView(step: stepRel)
+                    .navigationTitle("Edit Step")
+            }
+        }
+    }
+}
+#endif

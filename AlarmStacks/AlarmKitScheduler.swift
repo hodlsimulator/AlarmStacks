@@ -36,6 +36,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     private func storageKey(for stack: Stack) -> String { "alarmkit.ids.\(stack.id.uuidString)" }
     private func expectedKey(for id: UUID) -> String { "ak.expected.\(id.uuidString)" }
+    private func snoozeMapKey(for base: UUID) -> String { "ak.snooze.map.\(base.uuidString)" }
 
     // MARK: - Permissions
 
@@ -116,6 +117,11 @@ final class AlarmKitScheduler: AlarmScheduling {
             // Persist expected times for diagnostics
             defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
 
+            // Store snooze metadata so a later snooze can recreate a matching alert
+            defaults.set(step.snoozeMinutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
+            defaults.set(stack.name,        forKey: "ak.stackName.\(id.uuidString)")
+            defaults.set(step.title,        forKey: "ak.stepTitle.\(id.uuidString)")
+
             // Single AK timer per step (no retries)
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
                 .timer(duration: TimeInterval(seconds), attributes: attrs)
@@ -136,7 +142,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in (defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) {
                 try? manager.cancel(id: id)
-                defaults.removeObject(forKey: expectedKey(for: id))
+                cleanupExpectationAndMetadata(for: id)
             }
         }
         defaults.removeObject(forKey: key)
@@ -146,10 +152,69 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
     }
 
+    // MARK: - AlarmKit Snooze (timer-based, no UN)
+
+    /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
+    /// - Important: This cancels any prior snooze tied to `baseAlarmID` so there’s never more than one active snooze.
+    /// - Returns: The new snooze alarm UUID string, or nil on failure.
+    @discardableResult
+    func scheduleSnooze(
+        baseAlarmID: UUID,
+        stackName: String,
+        stepTitle: String,
+        minutes: Int
+    ) async -> String? {
+        // Cancel an existing snooze for this base alarm, if any.
+        if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
+           let existingID = UUID(uuidString: existing) {
+            try? manager.cancel(id: existingID)
+            cleanupExpectationAndMetadata(for: existingID)
+            defaults.removeObject(forKey: snoozeMapKey(for: baseAlarmID))
+        }
+
+        let id = UUID()
+        let seconds = max(60, minutes * 60)
+        let target = Date().addingTimeInterval(TimeInterval(seconds))
+
+        let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
+        let alert = makeAlert(title: title, allowSnooze: true)
+        let attrs = makeAttributes(alert: alert)
+
+        do {
+            let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> =
+                .timer(duration: TimeInterval(seconds), attributes: attrs)
+            _ = try await manager.schedule(id: id, configuration: cfg)
+
+            // Persist diagnostics + mapping so we can compute deltas and chain snoozes.
+            defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
+            defaults.set(id.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
+            defaults.set(minutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
+            defaults.set(stackName, forKey: "ak.stackName.\(id.uuidString)")
+            defaults.set(stepTitle, forKey: "ak.stepTitle.\(id.uuidString)")
+
+            DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; target=\(DiagLog.f(target))")
+            return id.uuidString
+        } catch {
+            DiagLog.log("AK snooze schedule FAILED base=\(baseAlarmID.uuidString) error=\(error)")
+            return nil
+        }
+    }
+
+    /// Cancels the active snooze (if any) tied to a base alarm.
+    func cancelSnooze(for baseAlarmID: UUID) {
+        if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
+           let existingID = UUID(uuidString: existing) {
+            try? manager.cancel(id: existingID)
+            cleanupExpectationAndMetadata(for: existingID)
+            defaults.removeObject(forKey: snoozeMapKey(for: baseAlarmID))
+            DiagLog.log("AK snooze cancel base=\(baseAlarmID.uuidString) id=\(existingID.uuidString)")
+        }
+    }
+
     // MARK: Helpers
 
     private func nextEnabledStepFireDate(for stack: Stack, calendar: Calendar) -> Date? {
-        var base = Date()
+        let base = Date()
         for step in stack.sortedSteps where step.isEnabled {
             switch step.kind {
             case .fixedTime:
@@ -179,6 +244,13 @@ final class AlarmKitScheduler: AlarmScheduling {
             return max(minLead, Int(ceil(raw)))
         }
         return nil
+    }
+
+    private func cleanupExpectationAndMetadata(for id: UUID) {
+        defaults.removeObject(forKey: expectedKey(for: id))
+        defaults.removeObject(forKey: "ak.snoozeMinutes.\(id.uuidString)")
+        defaults.removeObject(forKey: "ak.stackName.\(id.uuidString)")
+        defaults.removeObject(forKey: "ak.stepTitle.\(id.uuidString)")
     }
 }
 

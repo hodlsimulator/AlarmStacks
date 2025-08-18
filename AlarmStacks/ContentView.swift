@@ -278,7 +278,10 @@ private struct StepChip: View {
             if let s = step.durationSeconds { return "\(format(seconds: s))  \(step.title)" }
             return step.title
         case .relativeToPrev:
-            if let s = step.offsetSeconds { return "+\(format(seconds: s))  \(step.title)" }
+            if let s = step.offsetSeconds {
+                let sign = s >= 0 ? "+" : "−"
+                return "\(sign)\(format(seconds: abs(s)))  \(step.title)"
+            }
             return step.title
         }
     }
@@ -401,7 +404,13 @@ private struct StepRow: View {
             if let s = step.durationSeconds { return "Timer • \(format(seconds: s))" }
             return "Timer"
         case .relativeToPrev:
-            if let s = step.offsetSeconds { return "After previous • +\(format(seconds: s))" }
+            if let s = step.offsetSeconds {
+                if s >= 0 {
+                    return "After previous • +\(format(seconds: s))"
+                } else {
+                    return "Before previous • −\(format(seconds: -s))"
+                }
+            }
             return "After previous"
         }
     }
@@ -525,29 +534,54 @@ private struct AddStepSheet: View {
 
     @State private var title: String = ""
     @State private var kind: StepKind = .fixedTime
+
+    // Fixed time
     @State private var hour: Int  = Calendar.current.component(.hour, from: Date())
     @State private var minute: Int = Calendar.current.component(.minute, from: Date())
+
+    // Duration / After previous
+    @State private var direction: Direction = .after
     @State private var minutesAmount: Int = 10
+    @State private var secondsAmount: Int = 0
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Basics") {
                     TextField("Title", text: $title)
+                        .textInputAutocapitalization(.words)
+                        .disableAutocorrection(true)
                     Picker("Kind", selection: $kind) {
                         Text("Fixed time").tag(StepKind.fixedTime)
                         Text("Timer").tag(StepKind.timer)
                         Text("After previous").tag(StepKind.relativeToPrev)
                     }
+                    .pickerStyle(.segmented)
                 }
+
                 if kind == .fixedTime {
                     Section("Time") {
                         Stepper(value: $hour, in: 0...23) { Text("Hour: \(hour)") }
                         Stepper(value: $minute, in: 0...59) { Text("Minute: \(minute)") }
                     }
-                } else {
-                    Section(kind == .timer ? "Duration" : "Offset") {
-                        Stepper(value: $minutesAmount, in: 1...240) { Text("\(minutesAmount) minutes") }
+                } else if kind == .timer {
+                    Section("Duration") {
+                        durationEditors
+                    }
+                } else if kind == .relativeToPrev {
+                    Section("After previous") {
+                        Picker("Direction", selection: $direction) {
+                            Text("After").tag(Direction.after)
+                            Text("Before").tag(Direction.before)
+                        }
+                        .pickerStyle(.segmented)
+
+                        durationEditors
+
+                        Text(humanReadableRelative)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
                     }
                 }
             }
@@ -558,19 +592,74 @@ private struct AddStepSheet: View {
                     Button("Add") {
                         addStep()
                     }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || invalidDuration)
                 }
             }
         }
     }
 
+    // MARK: - Subviews
+
+    private var durationEditors: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent("Length") {
+                Text(formatted(totalSeconds))
+                    .monospacedDigit()
+            }
+            HStack {
+                Stepper(value: $minutesAmount, in: 0...720) {
+                    Text("Minutes: \(minutesAmount)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Stepper(value: $secondsAmount, in: 0...59) {
+                    Text("Seconds: \(secondsAmount)")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .labelStyle(.titleOnly)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private var totalSeconds: Int {
+        max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
+    }
+
+    private var invalidDuration: Bool {
+        if kind == .timer || kind == .relativeToPrev {
+            return totalSeconds == 0
+        }
+        return false
+    }
+
+    private var humanReadableRelative: String {
+        let s = totalSeconds
+        guard s > 0 else { return "No delay" }
+        let h = s / 3600
+        let m = (s % 3600) / 60
+        let sec = s % 60
+
+        let dur: String = {
+            if h > 0 { return "\(h)h \(m)m" }
+            if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
+            if m > 0 { return "\(m)m" }
+            return "\(sec)s"
+        }()
+
+        return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
+    }
+
     private func addStep() {
         let order = (stack.sortedSteps.last?.order ?? -1) + 1
         let def = Settings.shared
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeTitle = trimmed.isEmpty ? (kind == .fixedTime ? "Alarm" : (kind == .timer ? "Timer" : "After previous")) : trimmed
+
         let step: Step
         switch kind {
         case .fixedTime:
-            step = Step(title: title,
+            step = Step(title: safeTitle,
                         kind: .fixedTime,
                         order: order,
                         hour: hour,
@@ -578,23 +667,29 @@ private struct AddStepSheet: View {
                         allowSnooze: def.defaultAllowSnooze,
                         snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
+
         case .timer:
-            step = Step(title: title,
+            let secs = max(1, totalSeconds)
+            step = Step(title: safeTitle,
                         kind: .timer,
                         order: order,
-                        durationSeconds: minutesAmount * 60,
+                        durationSeconds: secs,
                         allowSnooze: def.defaultAllowSnooze,
                         snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
+
         case .relativeToPrev:
-            step = Step(title: title,
+            let secs = max(0, totalSeconds)
+            let signed = (direction == .after ? 1 : -1) * secs
+            step = Step(title: safeTitle,
                         kind: .relativeToPrev,
                         order: order,
-                        offsetSeconds: minutesAmount * 60,
+                        offsetSeconds: signed,
                         allowSnooze: def.defaultAllowSnooze,
                         snoozeMinutes: def.defaultSnoozeMinutes,
                         stack: stack)
         }
+
         stack.steps.append(step)
         try? modelContext.save()
 
@@ -608,6 +703,19 @@ private struct AddStepSheet: View {
         } else {
             dismiss()
         }
+    }
+
+    // MARK: - Types
+
+    private enum Direction { case after, before }
+
+    private func formatted(_ seconds: Int) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m \(s)s" }
+        if m > 0 { return s > 0 ? "\(m)m \(s)s" : "\(m)m" }
+        return "\(s)s"
     }
 }
 

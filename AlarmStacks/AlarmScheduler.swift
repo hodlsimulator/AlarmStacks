@@ -13,9 +13,22 @@ import SwiftData
 @MainActor
 protocol AlarmScheduling {
     func requestAuthorizationIfNeeded() async throws
+    @discardableResult
     func schedule(stack: Stack, calendar: Calendar) async throws -> [String] // returns identifiers
     func cancelAll(for stack: Stack) async
     func rescheduleAll(stacks: [Stack], calendar: Calendar) async
+}
+
+// Convenience overloads so callers using the protocol don’t need to pass a Calendar every time.
+extension AlarmScheduling {
+    @discardableResult
+    func schedule(stack: Stack) async throws -> [String] {
+        try await schedule(stack: stack, calendar: .current)
+    }
+
+    func rescheduleAll(stacks: [Stack]) async {
+        await rescheduleAll(stacks: stacks, calendar: .current)
+    }
 }
 
 // MARK: - UserNotificationScheduler
