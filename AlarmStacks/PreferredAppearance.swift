@@ -6,6 +6,9 @@
 //
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Appearance mode
 
@@ -19,19 +22,9 @@ enum AppearanceMode: String, CaseIterable {
         case .dark:   return "Dark"
         }
     }
-
-    /// Never returns `nil`. For `.system` we forward the **current base** scheme so updates
-    /// propagate correctly while a sheet is open.
-    func resolvedColorScheme(using base: ColorScheme) -> ColorScheme {
-        switch self {
-        case .system: return base
-        case .light:  return .light
-        case .dark:   return .dark
-        }
-    }
 }
 
-// MARK: - Theme tint (shared with ThemePickerView choices)
+// MARK: - Theme tint
 
 private func tintColor(for name: String) -> Color {
     switch name {
@@ -50,32 +43,105 @@ private func tintColor(for name: String) -> Color {
     }
 }
 
-// MARK: - Global appearance modifier
-//
-// Fixes: When switching from Light → System (device dark) while a sheet is open,
-// the sheet now flips immediately to dark. We never pass `nil` into preferredColorScheme.
-// Instead we **explicitly** set the environment colorScheme to either the user's choice
-// or the current base scheme for `.system`. Tint is centralized here so every presentation
-// scope (including sheets) picks it up consistently.
+// MARK: - Host modifier (environment only; never preferredColorScheme)
 
-struct PreferredAppearance: ViewModifier {
-    @Environment(\.colorScheme) private var baseScheme
-
+private struct PreferredAppearanceHost: ViewModifier {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")     private var themeName: String = "Default"
 
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        switch AppearanceMode(rawValue: mode) ?? .system {
+        case .system:
+            content
+                .tint(tintColor(for: themeName))
+        case .light:
+            content
+                .environment(\.colorScheme, .light)
+                .tint(tintColor(for: themeName))
+        case .dark:
+            content
+                .environment(\.colorScheme, .dark)
+                .tint(tintColor(for: themeName))
+        }
+    }
+}
+
+#if os(iOS)
+// MARK: - UIKit override for the SHEET host (instant, no dismissals)
+
+private struct SheetUIStyleOverride: UIViewControllerRepresentable {
+    var mode: AppearanceMode
+
+    func makeUIViewController(context: Context) -> UIViewController {
+        let vc = UIViewController()
+        vc.view.isHidden = true
+        vc.view.isUserInteractionEnabled = false
+        vc.view.backgroundColor = .clear
+        return vc
+    }
+
+    func updateUIViewController(_ vc: UIViewController, context: Context) {
+        let target: UIUserInterfaceStyle = {
+            switch mode {
+            case .system: return .unspecified
+            case .light:  return .light
+            case .dark:   return .dark
+            }
+        }()
+        // Apply to the sheet’s hosting controller only.
+        DispatchQueue.main.async {
+            if let parent = vc.parent {
+                parent.overrideUserInterfaceStyle = target
+                parent.navigationController?.overrideUserInterfaceStyle = target
+            }
+        }
+    }
+
+    static func dismantleUIViewController(_ vc: UIViewController, coordinator: ()) {
+        vc.parent?.overrideUserInterfaceStyle = .unspecified
+        vc.parent?.navigationController?.overrideUserInterfaceStyle = .unspecified
+    }
+}
+#else
+private struct SheetUIStyleOverride: View {
+    var mode: AppearanceMode
+    var body: some View { EmptyView() }
+}
+#endif
+
+// MARK: - Sheet modifier (drive chrome via UIKit; nudge SwiftUI env to match)
+
+private struct PreferredAppearanceSheet: ViewModifier {
+    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
+    @AppStorage("themeName")     private var themeName: String = "Default"
+
+    @ViewBuilder
     func body(content: Content) -> some View {
         let selected = AppearanceMode(rawValue: mode) ?? .system
-        let effective = selected.resolvedColorScheme(using: baseScheme)
 
-        // Use environment(\.colorScheme, …) so updates propagate reliably in sheets.
-        content
-            .environment(\.colorScheme, effective)
-            .tint(tintColor(for: themeName))
+        switch selected {
+        case .system:
+            content
+                .background(SheetUIStyleOverride(mode: .system).frame(width: 0, height: 0))
+                .tint(tintColor(for: themeName))  // no colorScheme override in System
+
+        case .light:
+            content
+                .environment(\.colorScheme, .light)
+                .background(SheetUIStyleOverride(mode: .light).frame(width: 0, height: 0))
+                .tint(tintColor(for: themeName))
+
+        case .dark:
+            content
+                .environment(\.colorScheme, .dark)
+                .background(SheetUIStyleOverride(mode: .dark).frame(width: 0, height: 0))
+                .tint(tintColor(for: themeName))
+        }
     }
 }
 
 extension View {
-    /// Apply the app’s unified appearance (color scheme + tint).
-    func preferredAppearance() -> some View { modifier(PreferredAppearance()) }
+    func preferredAppearanceHost() -> some View { modifier(PreferredAppearanceHost()) }
+    func preferredAppearanceSheet() -> some View { modifier(PreferredAppearanceSheet()) }
 }

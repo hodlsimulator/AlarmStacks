@@ -22,6 +22,7 @@ struct SettingsView: View {
     private var appearanceID: String {
         "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
     }
+    private var selectedMode: AppearanceMode { AppearanceMode(rawValue: mode) ?? .system }
 
     var body: some View {
         NavigationStack {
@@ -93,25 +94,82 @@ struct SettingsView: View {
                     }
                 }
             }
-            // Liquid Glass sheet look (no opaque backgrounds inside)
-            .scrollContentBackground(.hidden)
-            .background(.clear)
+            // ——————————————————————————————————————————————————————————————
+            // IMPORTANT: Make the sheet OPAQUE only for Light/Dark so nothing
+            // from the dark host bleeds through the glass. Keep glass for System.
+            // ——————————————————————————————————————————————————————————————
+            .applySheetFormBackground(for: selectedMode)
 
             .navigationTitle("Settings")
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+
+            // Ensure the nav bar text/buttons adopt the forced scheme when not System
+            .applySheetToolbarStyle(for: selectedMode)
+
             .task { await store.load() }
         }
         // Don’t animate layout when switching appearance to avoid any jiggle
         .animation(nil, value: mode)
+
         .sheet(isPresented: $showingPaywall) {
             PaywallView()
-                .id(appearanceID)           // paywall can still rebuild on theme changes
-                .preferredAppearance()
+                .id(appearanceID)
+                .preferredAppearanceSheet() // you already apply sheet-wide appearance
                 .presentationDetents([.medium, .large])
         }
+    }
+}
+
+// MARK: - Sheet styling helpers (scoped to this file)
+
+private struct SheetFormBackground: ViewModifier {
+    let mode: AppearanceMode
+    func body(content: Content) -> some View {
+        switch mode {
+        case .system:
+            // Keep the "Liquid Glass" look, let it reflect the app behind.
+            content
+                .scrollContentBackground(.hidden)
+                .background(.clear)
+        case .light, .dark:
+            // Make the sheet fully opaque so it cleanly flips to Light/Dark.
+            content
+                .scrollContentBackground(.visible)
+                .background(Color(.systemGroupedBackground))
+        }
+    }
+}
+
+private struct SheetToolbarStyle: ViewModifier {
+    let mode: AppearanceMode
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        switch mode {
+        case .system:
+            content
+                .toolbarBackground(.automatic, for: .navigationBar)
+        case .light:
+            content
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+                .toolbarColorScheme(.light, for: .navigationBar)
+        case .dark:
+            content
+                .toolbarBackground(.visible, for: .navigationBar)
+                .toolbarBackground(Color(.systemBackground), for: .navigationBar)
+                .toolbarColorScheme(.dark, for: .navigationBar)
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+private extension View {
+    func applySheetFormBackground(for mode: AppearanceMode) -> some View {
+        modifier(SheetFormBackground(mode: mode))
+    }
+    func applySheetToolbarStyle(for mode: AppearanceMode) -> some View {
+        modifier(SheetToolbarStyle(mode: mode))
     }
 }

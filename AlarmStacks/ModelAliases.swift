@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Combine
 
 typealias AlarmStack = Stack
 typealias AlarmStep  = Step

@@ -91,7 +91,7 @@ private struct StackDetailView: View {
         .listStyle(.insetGrouped)
         .themedSurface()
         .scrollDismissesKeyboard(.interactively)
-        .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
+        .dismissKeyboardOnTapAnywhere()
         .navigationTitle(stack.name)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -102,9 +102,9 @@ private struct StackDetailView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             AddStepSheet(stack: stack)
-                .id(appearanceID)           // ensure rebuild on appearance changes
-                .preferredAppearance()
-                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+                .id(appearanceID)
+                .preferredAppearanceSheet()
+                .presentationDetents(Set([PresentationDetent.medium, PresentationDetent.large]))
         }
     }
 }
@@ -172,25 +172,18 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme)  private var systemScheme
     @Environment(\.scenePhase)   private var scenePhase
+    @EnvironmentObject private var router: ModalRouter
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
-
-    @State private var showingAddStack = false
-    @State private var showingSettings = false
-    @State private var showingPaywall = false
-
-    @StateObject private var store = Store.shared
 
     // Prevent overlapping schedule/cancel on the same stack from different UI entry points
     @State private var busyStacks: Set<UUID> = []
+    @StateObject private var store = Store.shared
 
-    // Keep the Settings sheet detent pinned even if the view updates
-    @State private var settingsDetent: PresentationDetent = .medium
-    
     @Namespace private var sheetNS
 
     private let freeStackLimit = 2
 
-    // Forcing sheet rebuilds when appearance or theme changes
+    // Forcing rebuilds when appearance or theme changes
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")      private var themeName: String = "Default"
     private var appearanceID: String {
@@ -215,16 +208,16 @@ struct ContentView: View {
                     EmptyState(
                         addSamples: {
                             if !store.isPlus && stacks.count >= freeStackLimit {
-                                showingPaywall = true
+                                router.showPaywall()
                             } else {
                                 addSampleStacksCapped()
                             }
                         },
                         createNew: {
                             if !store.isPlus && stacks.count >= freeStackLimit {
-                                showingPaywall = true
+                                router.showPaywall()
                             } else {
-                                showingAddStack = true
+                                router.showAddStack()
                             }
                         }
                     )
@@ -261,7 +254,7 @@ struct ContentView: View {
                             StackCard(color: stackAccent(for: stack)) {
                                 StackRow(stack: stack)
                             }
-                            .contentShape(Rectangle()) // whole tile tappable
+                            .contentShape(Rectangle())
                         }
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                         .listRowBackground(Color.clear)
@@ -290,7 +283,7 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                     .singleLineTightTail()
                                 Spacer()
-                                Button("Get Plus") { showingPaywall = true }
+                                Button("Get Plus") { router.showPaywall() }
                                     .buttonStyle(.borderedProminent)
                             }
                         }
@@ -299,30 +292,29 @@ struct ContentView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .themedSurface()                          // colours the list itself
-            .scrollDismissesKeyboard(.interactively)  // swipe down to dismiss
-            .dismissKeyboardOnTapAnywhere()           // ← new: tap anywhere to dismiss
+            .themedSurface()
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnTapAnywhere()
 
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
 
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button { showingSettings = true } label: {
+                    Button { router.showSettings() } label: {
                         Label("Settings", systemImage: "gearshape")
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         if !store.isPlus && stacks.count >= freeStackLimit {
-                            showingPaywall = true
+                            router.showPaywall()
                         } else {
-                            showingAddStack = true
+                            router.showAddStack()
                         }
                     } label: {
                         Label("Add Stack", systemImage: "plus")
                     }
-                    // iOS 26: source for the zooming sheet transition
                     .matchedTransitionSource(id: "addStack", in: sheetNS)
                 }
             }
@@ -333,37 +325,10 @@ struct ContentView: View {
                 StepEditorView(step: step)
             }
         }
-        // Apply theme background at the root so it shows under the large title & safe areas.
         .background(ThemeSurfaceBackground())
 
-        .sheet(isPresented: $showingAddStack) {
-            AddStackSheet { newStack in
-                modelContext.insert(newStack)
-                try? modelContext.save()
-            }
-            .id(appearanceID)
-            .preferredAppearance()
-            .presentationDetents([.medium, .large]) // Liquid Glass at partial height
-            // iOS 26: destination of the zoom transition (morphs from the add button)
-            .navigationTransition(.zoom(sourceID: "addStack", in: sheetNS))
-        }
-
-        // Settings: keep detent fixed + no remount on theme change
-        .sheet(isPresented: $showingSettings) {
-            SettingsView()
-                .preferredAppearance()
-                .presentationDetents([.medium, .large], selection: $settingsDetent)
-        }
-
-        .sheet(isPresented: $showingPaywall) {
-            PaywallView()
-                .id(appearanceID)
-                .preferredAppearance()
-                .presentationDetents([.medium, .large])
-        }
         .task { await store.load() }
 
-        // Ensure the theme is mirrored + live-activities recolour
         .syncThemeToAppGroup()
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
@@ -421,7 +386,7 @@ struct ContentView: View {
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) } // fixed typo
+                defer { busyStacks.remove(stack.id) }
                 await AlarmScheduler.shared.cancelAll(for: stack)
             }
             modelContext.delete(stack)
@@ -654,379 +619,6 @@ private func stackAccent(for stack: Stack) -> Color {
     ]
     let idx = abs(stack.id.uuidString.hashValue) % palette.count
     return palette[idx]
-}
-
-// MARK: - Add Stack / Step (inline components so file compiles standalone)
-
-private struct AddStackSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var name: String = ""
-    var onCreate: (Stack) -> Void
-
-    @State private var addFirstStep = true
-    @State private var firstStepKind: StepKind = .fixedTime
-
-    // Unified time-of-day picker
-    @State private var firstStepTime: Date = Date()
-
-    // After previous (shared UI style)
-    @State private var direction: Direction = .after
-    @State private var minutesAmount: Int = 10
-    @State private var secondsAmount: Int = 0
-
-    var body: some View {
-        NavigationStack {
-            ScrollViewReader { proxy in
-                Form {
-                    Section("Stack") {
-                        TextField("Name", text: $name)
-                    }
-
-                    Section("First step") {
-                        Toggle("Add a first step", isOn: $addFirstStep)
-
-                        if addFirstStep {
-                            Picker("Kind", selection: $firstStepKind) {
-                                Text("Fixed time").tag(StepKind.fixedTime)
-                                Text("After previous").tag(StepKind.relativeToPrev)
-                            }
-                            .pickerStyle(.segmented)
-
-                            switch firstStepKind {
-                            case .fixedTime:
-                                DatePicker("Time",
-                                           selection: $firstStepTime,
-                                           displayedComponents: .hourAndMinute)
-                                    .datePickerStyle(.wheel)
-                                    .labelsHidden()
-                                    .id("firstStepWheel")
-
-                            case .timer:
-                                // Not offered anymore
-                                EmptyView()
-
-                            case .relativeToPrev:
-                                Picker("Direction", selection: $direction) {
-                                    Text("After").tag(Direction.after)
-                                    Text("Before").tag(Direction.before)
-                                }
-                                .pickerStyle(.segmented)
-
-                                durationEditors
-
-                                Text(humanReadableRelative)
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.top, 2)
-                                    .singleLineTightTail()
-                            }
-                        }
-                    }
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
-                .scrollContentBackground(.hidden)
-                .background(.clear)
-                .contentMargins(.bottom, 36, for: .scrollContent)
-                .onAppear {
-                    if addFirstStep && firstStepKind == .fixedTime {
-                        Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 60_000_000)
-                            withAnimation(.snappy) { proxy.scrollTo("firstStepWheel", anchor: .bottom) }
-                        }
-                    }
-                }
-                .onChange(of: firstStepKind) { _, new in
-                    if addFirstStep && new == .fixedTime {
-                        withAnimation(.snappy) { proxy.scrollTo("firstStepWheel", anchor: .bottom) }
-                    }
-                }
-            }
-            .navigationTitle("New Stack")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") { create() }
-                    .disabled(addFirstStep && firstStepKind == .relativeToPrev && totalSeconds == 0)
-                }
-            }
-        }
-    }
-
-    private var durationEditors: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Delay") {
-                Text(formatted(totalSeconds)).monospacedDigit().singleLineTightTail()
-            }
-            HStack {
-                Stepper(value: $minutesAmount, in: 0...720) {
-                    Text("Minutes: \(minutesAmount)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .singleLineTightTail()
-                }
-                Stepper(value: $secondsAmount, in: 0...59) {
-                    Text("Seconds: \(secondsAmount)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .singleLineTightTail()
-                }
-            }
-            .labelStyle(.titleOnly)
-        }
-    }
-
-    private var totalSeconds: Int {
-        max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
-    }
-
-    private var humanReadableRelative: String {
-        let s = totalSeconds
-        guard s > 0 else { return "No delay" }
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        let dur: String = {
-            if h > 0 { return "\(h)h \(m)m" }
-            if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
-            if m > 0 { return "\(m)m" }
-            return "\(sec)s"
-        }()
-        return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
-    }
-
-    private func create() {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
-
-        if addFirstStep {
-            let def = Settings.shared
-            let order = 0
-            let step: Step
-            switch firstStepKind {
-            case .fixedTime:
-                let c = Calendar.current.dateComponents([.hour, .minute], from: firstStepTime)
-                step = Step(title: "Start",
-                            kind: .fixedTime,
-                            order: order,
-                            hour: c.hour, minute: c.minute,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
-            case .timer:
-                fatalError("Timer is no longer available for creation.")
-            case .relativeToPrev:
-                let secs = max(0, totalSeconds)
-                let signed = (direction == .after ? 1 : -1) * secs
-                step = Step(title: "After previous",
-                            kind: .relativeToPrev,
-                            order: order,
-                            offsetSeconds: signed,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
-            }
-            s.steps = [step]
-        }
-
-        onCreate(s)
-        dismiss()
-    }
-
-    private enum Direction { case after, before }
-
-    private func formatted(_ seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        if h > 0 { return "\(h)h \(m)m \(s)s" }
-        if m > 0 { return s > 0 ? "\(m)m \(s)s" : "\(m)m" }
-        return "\(s)s"
-    }
-}
-
-private struct AddStepSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-
-    let stack: Stack
-
-    @State private var title: String = ""
-    @State private var kind: StepKind = .fixedTime
-
-    // Fixed time (unified DatePicker)
-    @State private var timeOfDay: Date = Date()
-
-    // After previous
-    @State private var direction: Direction = .after
-    @State private var minutesAmount: Int = 10
-    @State private var secondsAmount: Int = 0
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Basics") {
-                    TextField("Title", text: $title)
-                        .textInputAutocapitalization(.words)
-                        .disableAutocorrection(true)
-                    Picker("Kind", selection: $kind) {
-                        Text("Fixed time").tag(StepKind.fixedTime)
-                        Text("After previous").tag(StepKind.relativeToPrev)
-                    }
-                    .pickerStyle(.segmented)
-                }
-
-                switch kind {
-                case .fixedTime:
-                    Section("Time") {
-                        DatePicker("Time", selection: $timeOfDay, displayedComponents: .hourAndMinute)
-                            .datePickerStyle(.compact)
-                    }
-                case .timer:
-                    // Not offered anymore; keep case to satisfy exhaustiveness.
-                    EmptyView()
-                case .relativeToPrev:
-                    Section("After previous") {
-                        Picker("Direction", selection: $direction) {
-                            Text("After").tag(Direction.after)
-                            Text("Before").tag(Direction.before)
-                        }
-                        .pickerStyle(.segmented)
-
-                        durationEditors
-
-                        Text(humanReadableRelative)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 2)
-                            .singleLineTightTail()
-                    }
-                }
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
-            .scrollContentBackground(.hidden)
-            .background(.clear)
-
-            .navigationTitle("Add Step")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Add") {
-                        addStep()
-                    }
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || invalidDuration)
-                }
-            }
-        }
-    }
-
-    private var durationEditors: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Delay") {
-                Text(formatted(totalSeconds))
-                    .monospacedDigit()
-                    .singleLineTightTail()
-            }
-            HStack {
-                Stepper(value: $minutesAmount, in: 0...720) {
-                    Text("Minutes: \(minutesAmount)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .singleLineTightTail()
-                }
-                Stepper(value: $secondsAmount, in: 0...59) {
-                    Text("Seconds: \(secondsAmount)")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .singleLineTightTail()
-                }
-            }
-            .labelStyle(.titleOnly)
-        }
-    }
-
-    private var totalSeconds: Int {
-        max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
-    }
-
-    private var invalidDuration: Bool {
-        // Only applies to "After previous" now
-        return (kind == .relativeToPrev) && totalSeconds == 0
-    }
-
-    private var humanReadableRelative: String {
-        let s = totalSeconds
-        guard s > 0 else { return "No delay" }
-        let h = s / 3600
-        let m = (s % 3600) / 60
-        let sec = s % 60
-        let dur: String = {
-            if h > 0 { return "\(h)h \(m)m" }
-            if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
-            if m > 0 { return "\(m)m" }
-            return "\(sec)s"
-        }()
-        return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
-    }
-
-    private func addStep() {
-        let order = (stack.sortedSteps.last?.order ?? -1) + 1
-        let def = Settings.shared
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeTitle = trimmed.isEmpty ? (kind == .fixedTime ? "Start" : "After previous") : trimmed
-
-        let step: Step
-        switch kind {
-        case .fixedTime:
-            let comps = Calendar.current.dateComponents([.hour, .minute], from: timeOfDay)
-            step = Step(title: safeTitle,
-                        kind: .fixedTime,
-                        order: order,
-                        hour: comps.hour,
-                        minute: comps.minute,
-                        allowSnooze: def.defaultAllowSnooze,
-                        snoozeMinutes: def.defaultSnoozeMinutes,
-                        stack: stack)
-
-        case .timer:
-            fatalError("Timer is no longer available for creation.")
-
-        case .relativeToPrev:
-            let secs = max(0, totalSeconds)
-            let signed = (direction == .after ? 1 : -1) * secs
-            step = Step(title: safeTitle,
-                        kind: .relativeToPrev,
-                        order: order,
-                        offsetSeconds: signed,
-                        allowSnooze: def.defaultAllowSnooze,
-                        snoozeMinutes: def.defaultSnoozeMinutes,
-                        stack: stack)
-        }
-
-        stack.steps.append(step)
-        try? modelContext.save()
-
-        // Auto-reschedule when adding a step
-        if stack.isArmed {
-            Task { @MainActor in
-                await AlarmScheduler.shared.cancelAll(for: stack)
-                _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)
-                dismiss()
-            }
-        } else {
-            dismiss()
-        }
-    }
-
-    // MARK: - Types
-
-    private enum Direction { case after, before }
-
-    private func formatted(_ seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        if h > 0 { return "\(h)h \(m)m \(s)s" }
-        if m > 0 { return s > 0 ? "\(m)m \(s)s" : "\(m)m" }
-        return "\(s)s"
-    }
 }
 
 // MARK: - Empty State

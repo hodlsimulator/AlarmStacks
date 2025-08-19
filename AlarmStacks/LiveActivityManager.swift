@@ -8,6 +8,7 @@
 import Foundation
 import SwiftUI
 import ActivityKit
+import Combine
 
 @MainActor
 enum LiveActivityManager {

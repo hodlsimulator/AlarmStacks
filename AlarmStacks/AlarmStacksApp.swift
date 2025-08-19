@@ -91,29 +91,29 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 @main
 struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
+    @StateObject private var router = ModalRouter.shared
 
     init() {
-        // Activate local StoreKit testing on device (DEBUG builds only).
         #if DEBUG
         StoreKitLocalTesting.activateIfPossible()
         #endif
-
-        // Register categories & set delegate early.
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
-
-        // Request alarm/notification auth early.
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
     }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .alarmStopOverlay()
-                .background(ForegroundRearmCoordinator())
-                .preferredAppearance()
-                .syncThemeToAppGroup()
-                .onOpenURL { DeepLinks.handle($0) }
+            ZStack {
+                ContentView()
+                    .alarmStopOverlay()
+                    .background(ForegroundRearmCoordinator())
+                    .preferredAppearanceHost()   // host switches Light/Dark live (no preferredColorScheme)
+                GlobalSheetsHost()
+            }
+            .environmentObject(router)
+            .syncThemeToAppGroup()
+            .onOpenURL { DeepLinks.handle($0) }
         }
         .modelContainer(for: [Stack.self, Step.self])
     }
