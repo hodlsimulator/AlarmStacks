@@ -45,6 +45,7 @@ struct StepEditorView: View {
                 }
             }
         }
+        .themedSurface()   // ← gives the edit screen the same themed background
     }
 
     // MARK: - Sections
@@ -91,7 +92,6 @@ struct StepEditorView: View {
                 set: { new in
                     let sorted = Array(new).sorted()
                     step.weekdays = sorted.isEmpty ? [] : sorted
-                    // Legacy single weekday should not override a multi-select UI
                     step.weekday = nil
                 }
             ))
@@ -138,7 +138,6 @@ struct StepEditorView: View {
 
     private var afterPreviousSection: some View {
         Section("After previous") {
-            // Direction: After / Before
             Picker("Direction", selection: Binding<Direction>(
                 get: { (step.offsetSeconds ?? 60) >= 0 ? .after : .before },
                 set: { dir in
@@ -151,7 +150,6 @@ struct StepEditorView: View {
             }
             .pickerStyle(.segmented)
 
-            // Delay amount
             DurationEditor(
                 label: "Delay",
                 seconds: Binding(
@@ -163,7 +161,6 @@ struct StepEditorView: View {
                 )
             )
 
-            // Friendly phrase
             Text(relativePhrase(seconds: step.offsetSeconds ?? 60))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -190,10 +187,8 @@ struct StepEditorView: View {
     // MARK: - Save & reschedule
 
     private func saveAndReschedule() async {
-        // Persist edits
         try? modelContext.save()
 
-        // If this step's stack is armed, re-arm to apply changes immediately
         if let stack = step.stack, stack.isArmed {
             await AlarmScheduler.shared.cancelAll(for: stack)
             _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
@@ -243,7 +238,7 @@ private enum Direction: Hashable {
     case before
 }
 
-// MARK: - DurationEditor
+// MARK: - DurationEditor / WeekdayChips (unchanged below)
 
 private struct DurationEditor: View {
     let label: String
@@ -292,8 +287,6 @@ private struct DurationEditor: View {
         return "\(s)s"
     }
 }
-
-// MARK: - Weekday chips
 
 private struct WeekdayChips: View {
     @Binding var selected: Set<Int> // 1...7, Sunday = 1

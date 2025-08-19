@@ -16,6 +16,7 @@ private struct ShareItem: Identifiable {
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.colorScheme)  private var systemScheme
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
 
     @State private var showingAddStack = false
@@ -28,6 +29,13 @@ struct ContentView: View {
     @State private var busyStacks: Set<UUID> = []
 
     private let freeStackLimit = 2
+
+    // Forcing sheet rebuilds when appearance or theme changes
+    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
+    @AppStorage("themeName")      private var themeName: String = "Default"
+    private var appearanceID: String {
+        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -64,25 +72,32 @@ struct ContentView: View {
                             .tint(.orange)
                         }
                     }
+                    .listRowBackground(Color.clear)
 
                     ForEach(stacks) { stack in
-                        NavigationLink(value: stack) { StackRow(stack: stack) }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) { delete(stack: stack) } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
+                        NavigationLink(value: stack) {
+                            StackCard(color: stackAccent(for: stack)) {
+                                StackRow(stack: stack)
                             }
-                            .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                Button {
-                                    withGate(for: stack) {
-                                        await toggleArm(for: stack)
-                                    }
-                                } label: {
-                                    Label(stack.isArmed ? "Disarm" : "Arm",
-                                          systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
-                                }
-                                .tint(stack.isArmed ? .orange : .green)
+                        }
+                        .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
+                        .listRowBackground(Color.clear)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) { delete(stack: stack) } label: {
+                                Label("Delete", systemImage: "trash")
                             }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button {
+                                withGate(for: stack) {
+                                    await toggleArm(for: stack)
+                                }
+                            } label: {
+                                Label(stack.isArmed ? "Disarm" : "Arm",
+                                      systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
+                            }
+                            .tint(stack.isArmed ? .orange : .green)
+                        }
                     }
 
                     if !store.isPlus {
@@ -95,11 +110,14 @@ struct ContentView: View {
                                     .buttonStyle(.borderedProminent)
                             }
                         }
+                        .listRowBackground(Color.clear)
                     }
                 }
             }
             .listStyle(.insetGrouped)
+            .themedSurface() // requires ThemeSurface.swift
             .navigationTitle("Alarm Stacks")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showingSettings = true } label: {
@@ -121,7 +139,6 @@ struct ContentView: View {
             .navigationDestination(for: Stack.self) { stack in
                 StackDetailView(stack: stack)
             }
-            // Edit a step directly (implemented in StepEditorView.swift)
             .navigationDestination(for: Step.self) { step in
                 StepEditorView(step: step)
             }
@@ -131,15 +148,21 @@ struct ContentView: View {
                 modelContext.insert(newStack)
                 try? modelContext.save()
             }
+            .id(appearanceID)
+            .preferredAppearance()
             .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
+                .id(appearanceID)
+                .preferredAppearance()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
         .sheet(isPresented: $showingPaywall) {
             PaywallView()
-                .presentationDetents([.medium, .large])
+                .id(appearanceID)
+                .preferredAppearance()
+                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
         .task { await store.load() }
     }
@@ -149,7 +172,6 @@ struct ContentView: View {
     private func armAll() {
         Task { @MainActor in
             for s in stacks where !s.isArmed {
-                // Gate per stack to avoid overlapping operations initiated elsewhere
                 guard !busyStacks.contains(s.id) else { continue }
                 busyStacks.insert(s.id)
                 defer { busyStacks.remove(s.id) }
@@ -191,7 +213,6 @@ struct ContentView: View {
     }
 
     private func delete(stack: Stack) {
-        // Ensure we cancel scheduled alarms before removing the model to avoid orphaned alerts
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
@@ -204,7 +225,6 @@ struct ContentView: View {
     }
 
     private func addSampleStacksCapped() {
-        // Don’t exceed the free limit unless Plus is active.
         var capacity = store.isPlus ? Int.max : (freeStackLimit - stacks.count)
         guard capacity > 0 else { return }
 
@@ -254,7 +274,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Row
+// MARK: - Row (main list)
 
 private struct StackRow: View {
     @Bindable var stack: Stack
@@ -284,7 +304,6 @@ private struct StackRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(stack.sortedSteps) { step in
-                        // Tap to edit a step
                         NavigationLink(value: step) {
                             StepChip(step: step)
                         }
@@ -298,14 +317,10 @@ private struct StackRow: View {
     }
 
     private func nextStart(for stack: Stack) -> Date? {
-        // UI-only preview of the first enabled step’s next time (no scheduling).
         let base = Date()
         for step in stack.sortedSteps where step.isEnabled {
             switch step.kind {
-            case .fixedTime:
-                if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
-                else { return nil }
-            case .timer, .relativeToPrev:
+            case .fixedTime, .timer, .relativeToPrev:
                 if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
                 else { return nil }
             }
@@ -348,8 +363,7 @@ private struct StepChip: View {
             var time = "Time"
             if let h = step.hour, let m = step.minute { time = String(format: "%02d:%02d", h, m) }
             let days = daysText(for: step)
-            if days.isEmpty { return "\(time)  \(step.title)" }
-            return "\(time) • \(days)  \(step.title)"
+            return days.isEmpty ? "\(time)  \(step.title)" : "\(time) • \(days)  \(step.title)"
         case .timer:
             if let s = step.durationSeconds { return "\(format(seconds: s))  \(step.title)" }
             return step.title
@@ -372,13 +386,10 @@ private struct StepChip: View {
     private func daysText(for step: Step) -> String {
         let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
         let chosen: [Int]
-        if let arr = step.weekdays, !arr.isEmpty {
-            chosen = arr
-        } else if let one = step.weekday {
-            chosen = [one]
-        } else {
-            return ""
-        }
+        if let arr = step.weekdays, !arr.isEmpty { chosen = arr }
+        else if let one = step.weekday { chosen = [one] }
+        else { return "" }
+
         let set = Set(chosen)
         if set.count == 7 { return "Every day" }
         if set == Set([2,3,4,5,6]) { return "Weekdays" }
@@ -442,6 +453,8 @@ private struct StackDetailView: View {
                 }
             }
         }
+        .listStyle(.insetGrouped)
+        .themedSurface()
         .navigationTitle(stack.name)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -452,6 +465,7 @@ private struct StackDetailView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             AddStepSheet(stack: stack)
+                .preferredAppearance()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
     }
@@ -515,7 +529,47 @@ private struct StepRow: View {
     }
 }
 
-// MARK: - Add Stack / Step (unchanged logic in underlying models/scheduler)
+// MARK: - Cards, palette, background helpers
+
+private struct StackCard<Content: View>: View {
+    let color: Color
+    let content: Content
+    @Environment(\.colorScheme) private var scheme
+
+    init(color: Color, @ViewBuilder _ content: () -> Content) {
+        self.color = color
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(12)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(color.opacity(scheme == .dark ? 0.55 : 0.45), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.10), radius: 10, x: 0, y: 6)
+    }
+}
+
+private func stackAccent(for stack: Stack) -> Color {
+    // A gentle, readable pastel palette for per-stack accents.
+    let palette: [Color] = [
+        Color(red: 0.70, green: 0.83, blue: 1.00), // pastel blue
+        Color(red: 0.74, green: 0.90, blue: 0.82), // pastel green
+        Color(red: 1.00, green: 0.86, blue: 0.67), // pastel orange
+        Color(red: 0.87, green: 0.79, blue: 0.99), // pastel purple
+        Color(red: 1.00, green: 0.78, blue: 0.88), // pastel pink
+        Color(red: 0.78, green: 0.92, blue: 0.92), // pastel teal
+        Color(red: 0.81, green: 0.86, blue: 1.00), // pastel indigo
+        Color(red: 1.00, green: 0.92, blue: 0.68)  // pastel yellow
+    ]
+    let idx = abs(stack.id.uuidString.hashValue) % palette.count
+    return palette[idx]
+}
+
+// MARK: - Add Stack / Step (inline components so file compiles standalone)
 
 private struct AddStackSheet: View {
     @Environment(\.dismiss) private var dismiss

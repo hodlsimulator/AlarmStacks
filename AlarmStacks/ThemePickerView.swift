@@ -18,7 +18,7 @@ private struct ThemeOption: Identifiable, Hashable {
 
 private let themeOptions: [ThemeOption] = [
     // Free
-    ThemeOption(id: "Default",  name: "Default",  tint: Color(red: 0.04, green: 0.52, blue: 1.00), requiresPlus: false), // iOS blue
+    ThemeOption(id: "Default",  name: "Default",  tint: Color(red: 0.04, green: 0.52, blue: 1.00), requiresPlus: false),
     ThemeOption(id: "Forest",   name: "Forest",   tint: Color(red: 0.16, green: 0.62, blue: 0.39), requiresPlus: false),
     ThemeOption(id: "Coral",    name: "Coral",    tint: Color(red: 0.98, green: 0.45, blue: 0.35), requiresPlus: false),
 
@@ -31,12 +31,14 @@ private let themeOptions: [ThemeOption] = [
     ThemeOption(id: "Midnight", name: "Midnight", tint: Color(red: 0.10, green: 0.14, blue: 0.28), requiresPlus: true)
 ]
 
-// MARK: - Theme picker
+// MARK: - Picker
 
 struct ThemePickerView: View {
+    /// Called when the user taps a locked theme.
+    var onLockedTap: () -> Void = {}
+
     @AppStorage("themeName") private var themeName: String = "Default"
     @StateObject private var store = Store.shared
-    @State private var showingPaywall = false
 
     var body: some View {
         Section("Theme colour") {
@@ -44,7 +46,7 @@ struct ThemePickerView: View {
                 ForEach(themeOptions) { opt in
                     Button {
                         if opt.requiresPlus && !store.isPlus {
-                            showingPaywall = true
+                            onLockedTap()
                         } else {
                             themeName = opt.id
                         }
@@ -62,7 +64,6 @@ struct ThemePickerView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
-        .sheet(isPresented: $showingPaywall) { PaywallView() }
         .task { await store.load() }
     }
 }
@@ -71,12 +72,15 @@ private struct ThemeChip: View {
     let option: ThemeOption
     let selected: Bool
     let locked: Bool
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         VStack(spacing: 8) {
             ZStack {
+                // Pastel card derived from the theme tint, lighter in light mode.
+                let pastel = scheme == .dark ? option.tint.opacity(0.22) : option.tint.opacity(0.14)
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(option.tint.opacity(0.22))
+                    .fill(pastel)
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .strokeBorder(selected ? option.tint : Color.secondary.opacity(0.35),
@@ -94,22 +98,4 @@ private struct ThemeChip: View {
         }
         .frame(minWidth: 88)
     }
-}
-
-// MARK: - App-wide tint applier
-
-struct AppTint: ViewModifier {
-    @AppStorage("themeName") private var themeName: String = "Default"
-
-    func body(content: Content) -> some View {
-        content.tint(tintColor(for: themeName))
-    }
-
-    private func tintColor(for name: String) -> Color {
-        themeOptions.first(where: { $0.id == name })?.tint ?? themeOptions[0].tint
-    }
-}
-
-extension View {
-    func appTint() -> some View { modifier(AppTint()) }
 }

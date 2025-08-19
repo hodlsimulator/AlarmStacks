@@ -42,6 +42,8 @@ struct PaywallView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+            .toolbarBackgroundVisibility(.visible, for: .navigationBar)
         }
         .task { await store.load() }
     }

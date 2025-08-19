@@ -9,9 +9,19 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var systemScheme
+
     @StateObject private var settings = Settings.shared
     @StateObject private var store = Store.shared
+
     @State private var showingPaywall = false
+
+    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
+    @AppStorage("themeName")      private var themeName: String = "Default"
+
+    private var appearanceID: String {
+        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -31,8 +41,10 @@ struct SettingsView: View {
                     }
                 }
 
-                // Themes (tint colour only; Plus unlocks extra themes)
-                ThemePickerView()
+                // Themes (Plus unlocks extra)
+                ThemePickerView {
+                    showingPaywall = true
+                }
 
                 // Appearance selector (light/dark/system)
                 AppearancePickerView()
@@ -48,7 +60,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Sound info (system default only; custom tones removed)
+                // Sound info
                 SoundSettingsSection()
 
                 // Debug toggles
@@ -84,10 +96,13 @@ struct SettingsView: View {
                 }
             }
             .task { await store.load() }
-            .sheet(isPresented: $showingPaywall) {
-                PaywallView()
-                    .presentationDetents([.medium, .large])
-            }
+            .themedSurface()                // ← pastel background in BOTH schemes
+        }
+        .sheet(isPresented: $showingPaywall) {
+            PaywallView()
+                .id(appearanceID)           // rebuild when mode/system/theme changes
+                .preferredAppearance()
+                .presentationDetents([.medium, .large])
         }
     }
 }
