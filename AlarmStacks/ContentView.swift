@@ -28,6 +28,8 @@ struct ContentView: View {
 
     // Prevent overlapping schedule/cancel on the same stack from different UI entry points
     @State private var busyStacks: Set<UUID> = []
+    
+    @Namespace private var sheetNS
 
     private let freeStackLimit = 2
 
@@ -140,6 +142,8 @@ struct ContentView: View {
                     } label: {
                         Label("Add Stack", systemImage: "plus")
                     }
+                    // iOS 26: source for the zooming sheet transition
+                    .matchedTransitionSource(id: "addStack", in: sheetNS)
                 }
             }
             .navigationDestination(for: Stack.self) { stack in
@@ -159,19 +163,21 @@ struct ContentView: View {
             }
             .id(appearanceID)
             .preferredAppearance()
-            .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+            .presentationDetents([.medium, .large]) // Liquid Glass at partial height
+            // iOS 26: destination of the zoom transition (morphs from the add button)
+            .navigationTransition(.zoom(sourceID: "addStack", in: sheetNS))
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView()
                 .id(appearanceID)
                 .preferredAppearance()
-                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+                .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showingPaywall) {
             PaywallView()
                 .id(appearanceID)
                 .preferredAppearance()
-                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+                .presentationDetents([.medium, .large])
         }
         .task { await store.load() }
 
@@ -608,42 +614,71 @@ private struct AddStackSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Stack") {
-                    TextField("Name", text: $name)
-                }
-                Section("First step") {
-                    Toggle("Add a first step", isOn: $addFirstStep)
-                    if addFirstStep {
-                        Picker("Kind", selection: $firstStepKind) {
-                            Text("Fixed time").tag(StepKind.fixedTime)
-                            Text("Timer").tag(StepKind.timer)
-                            Text("After previous").tag(StepKind.relativeToPrev)
-                        }
-                        .pickerStyle(.segmented)
+            ScrollViewReader { proxy in
+                Form {
+                    Section("Stack") {
+                        TextField("Name", text: $name)
+                    }
 
-                        switch firstStepKind {
-                        case .fixedTime:
-                            // Wheel style => user can spin time and tap Create once.
-                            DatePicker("Time", selection: $firstStepTime, displayedComponents: .hourAndMinute)
-                                .datePickerStyle(.wheel)
-                                .labelsHidden()
+                    Section("First step") {
+                        Toggle("Add a first step", isOn: $addFirstStep)
 
-                        case .timer:
-                            durationEditors
-
-                        case .relativeToPrev:
-                            Picker("Direction", selection: $direction) {
-                                Text("After").tag(Direction.after)
-                                Text("Before").tag(Direction.before)
+                        if addFirstStep {
+                            Picker("Kind", selection: $firstStepKind) {
+                                Text("Fixed time").tag(StepKind.fixedTime)
+                                Text("Timer").tag(StepKind.timer)
+                                Text("After previous").tag(StepKind.relativeToPrev)
                             }
                             .pickerStyle(.segmented)
-                            durationEditors
 
-                            Text(humanReadableRelative)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 2)
+                            switch firstStepKind {
+                            case .fixedTime:
+                                // Wheel style => spin and tap Create once.
+                                DatePicker("Time",
+                                           selection: $firstStepTime,
+                                           displayedComponents: .hourAndMinute)
+                                    .datePickerStyle(.wheel)
+                                    .labelsHidden()
+                                    .id("firstStepWheel") // ← anchor for auto-scroll
+
+                            case .timer:
+                                durationEditors
+
+                            case .relativeToPrev:
+                                Picker("Direction", selection: $direction) {
+                                    Text("After").tag(Direction.after)
+                                    Text("Before").tag(Direction.before)
+                                }
+                                .pickerStyle(.segmented)
+
+                                durationEditors
+
+                                Text(humanReadableRelative)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 2)
+                            }
+                        }
+                    }
+                }
+                // Give a little breathing room at the bottom so the wheel isn't clipped.
+                .contentMargins(.bottom, 36, for: .scrollContent)
+
+                // Ensure the wheel is fully visible at .medium without changing detent.
+                .onAppear {
+                    if addFirstStep && firstStepKind == .fixedTime {
+                        Task { @MainActor in
+                            try? await Task.sleep(nanoseconds: 60_000_000) // allow layout
+                            withAnimation(.snappy) {
+                                proxy.scrollTo("firstStepWheel", anchor: .bottom)
+                            }
+                        }
+                    }
+                }
+                .onChange(of: firstStepKind) { _, new in
+                    if addFirstStep && new == .fixedTime {
+                        withAnimation(.snappy) {
+                            proxy.scrollTo("firstStepWheel", anchor: .bottom)
                         }
                     }
                 }
@@ -652,64 +687,19 @@ private struct AddStackSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
-
-                        if addFirstStep {
-                            let def = Settings.shared
-                            let order = 0
-                            let step: Step
-                            switch firstStepKind {
-                            case .fixedTime:
-                                let comps = Calendar.current.dateComponents([.hour, .minute], from: firstStepTime)
-                                step = Step(title: "Wake",
-                                            kind: .fixedTime,
-                                            order: order,
-                                            hour: comps.hour, minute: comps.minute,
-                                            allowSnooze: def.defaultAllowSnooze,
-                                            snoozeMinutes: def.defaultSnoozeMinutes,
-                                            stack: s)
-                            case .timer:
-                                let secs = max(1, totalSeconds)
-                                step = Step(title: "Timer",
-                                            kind: .timer,
-                                            order: order,
-                                            durationSeconds: secs,
-                                            allowSnooze: def.defaultAllowSnooze,
-                                            snoozeMinutes: def.defaultSnoozeMinutes,
-                                            stack: s)
-                            case .relativeToPrev:
-                                let secs = max(0, totalSeconds)
-                                let signed = (direction == .after ? 1 : -1) * secs
-                                step = Step(title: "After previous",
-                                            kind: .relativeToPrev,
-                                            order: order,
-                                            offsetSeconds: signed,
-                                            allowSnooze: def.defaultAllowSnooze,
-                                            snoozeMinutes: def.defaultSnoozeMinutes,
-                                            stack: s)
-                            }
-                            s.steps = [step]
-                        }
-
-                        onCreate(s)
-                        dismiss()
-                    }
-                    // Only block when adding a non-fixed step with zero duration.
+                    Button("Create") { create() }
                     .disabled(addFirstStep && (firstStepKind != .fixedTime && totalSeconds == 0))
                 }
             }
         }
     }
 
-    // MARK: - Subviews (shared with AddStepSheet below)
+    // MARK: - Subviews
 
     private var durationEditors: some View {
         VStack(alignment: .leading, spacing: 8) {
             LabeledContent("Duration") {
-                Text(formatted(totalSeconds))
-                    .monospacedDigit()
+                Text(formatted(totalSeconds)).monospacedDigit()
             }
             HStack {
                 Stepper(value: $minutesAmount, in: 0...720) {
@@ -746,6 +736,51 @@ private struct AddStackSheet: View {
         }()
 
         return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
+    }
+
+    private func create() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = Stack(name: trimmed.isEmpty ? "Untitled" : trimmed)
+
+        if addFirstStep {
+            let def = Settings.shared
+            let order = 0
+            let step: Step
+            switch firstStepKind {
+            case .fixedTime:
+                let c = Calendar.current.dateComponents([.hour, .minute], from: firstStepTime)
+                step = Step(title: "Wake",
+                            kind: .fixedTime,
+                            order: order,
+                            hour: c.hour, minute: c.minute,
+                            allowSnooze: def.defaultAllowSnooze,
+                            snoozeMinutes: def.defaultSnoozeMinutes,
+                            stack: s)
+            case .timer:
+                let secs = max(1, totalSeconds)
+                step = Step(title: "Timer",
+                            kind: .timer,
+                            order: order,
+                            durationSeconds: secs,
+                            allowSnooze: def.defaultAllowSnooze,
+                            snoozeMinutes: def.defaultSnoozeMinutes,
+                            stack: s)
+            case .relativeToPrev:
+                let secs = max(0, totalSeconds)
+                let signed = (direction == .after ? 1 : -1) * secs
+                step = Step(title: "After previous",
+                            kind: .relativeToPrev,
+                            order: order,
+                            offsetSeconds: signed,
+                            allowSnooze: def.defaultAllowSnooze,
+                            snoozeMinutes: def.defaultSnoozeMinutes,
+                            stack: s)
+            }
+            s.steps = [step]
+        }
+
+        onCreate(s)
+        dismiss()
     }
 
     // MARK: - Types
