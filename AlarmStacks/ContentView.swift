@@ -7,12 +7,166 @@
 
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // Wrapper so we can use `.sheet(item:)` later if you add export again
 private struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
 }
+
+// MARK: - Detail (moved to top so it's always in scope)
+
+private struct StackDetailView: View {
+    @Environment(\.modelContext) private var modelContext
+    @Environment(\.colorScheme)  private var systemScheme
+    @State private var calendar = Calendar.current
+    @State private var showingAddSheet = false
+
+    // Local busy flag to avoid overlapping cancel/reschedule from detail screen
+    @State private var isBusy = false
+
+    @Bindable var stack: Stack
+
+    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
+    @AppStorage("themeName")      private var themeName: String = "Default"
+    private var appearanceID: String {
+        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
+    }
+
+    var body: some View {
+        List {
+            // Editable stack name
+            Section("Stack") {
+                TextField("Name", text: $stack.name)
+                    .textInputAutocapitalization(.words)
+                    .disableAutocorrection(true)
+                    .singleLineTightTail()
+                    .onSubmit { try? modelContext.save() }
+                    .onChange(of: stack.name) { _, _ in try? modelContext.save() }
+            }
+
+            Section {
+                Toggle(isOn: Binding(get: { stack.isArmed }, set: { newVal in
+                    guard !isBusy else { return }
+                    isBusy = true
+                    Task { @MainActor in
+                        if newVal {
+                            if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)) != nil {
+                                stack.isArmed = true
+                            }
+                        } else {
+                            await AlarmScheduler.shared.cancelAll(for: stack)
+                            stack.isArmed = false
+                        }
+                        try? modelContext.save()
+                        isBusy = false
+                    }
+                })) { Text("Armed").singleLineTightTail() }
+            }
+
+            Section("Steps") {
+                ForEach(stack.sortedSteps) { step in
+                    NavigationLink(value: step) { StepRow(step: step) }
+                }
+                .onDelete { idx in
+                    let snapshot = stack.sortedSteps
+                    for i in idx { modelContext.delete(snapshot[i]) }
+                    try? modelContext.save()
+
+                    // Auto-reschedule after deletion (guard against overlap)
+                    if stack.isArmed, !isBusy {
+                        isBusy = true
+                        Task { @MainActor in
+                            await AlarmScheduler.shared.cancelAll(for: stack)
+                            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
+                            isBusy = false
+                        }
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .themedSurface()
+        .scrollDismissesKeyboard(.interactively)
+        .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
+        .navigationTitle(stack.name)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { showingAddSheet = true } label: {
+                    Label("Add Step", systemImage: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showingAddSheet) {
+            AddStepSheet(stack: stack)
+                .id(appearanceID)           // ensure rebuild on appearance changes
+                .preferredAppearance()
+                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
+        }
+    }
+}
+
+private struct StepRow: View {
+    @Bindable var step: Step
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(step.title)
+                    .font(.headline)
+                    .singleLineTightTail()
+                Text(detailText(for: step))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .singleLineTightTail(minScale: 0.9)
+            }
+            Spacer()
+            Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
+        }
+    }
+    private func detailText(for: Step) -> String {
+        let step = `for`
+        switch step.kind {
+        case .fixedTime:
+            var time = "Fixed"
+            if let h = step.hour, let m = step.minute { time = String(format: "Fixed • %02d:%02d", h, m) }
+            let days = daysText(for: step)
+            return days.isEmpty ? time : "\(time) • \(days)"
+        case .timer:
+            if let s = step.durationSeconds { return "Timer • \(format(seconds: s))" }
+            return "Timer"
+        case .relativeToPrev:
+            if let s = step.offsetSeconds {
+                if s >= 0 { return "After previous • +\(format(seconds: s))" }
+                else { return "Before previous • −\(format(seconds: -s))" }
+            }
+            return "After previous"
+        }
+    }
+    private func format(seconds: Int) -> String {
+        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
+        if h > 0 { return "\(h)h \(m)m" }
+        if m > 0 { return "\(m)m \(s)s" }
+        return "\(s)s"
+    }
+    private func daysText(for step: Step) -> String {
+        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
+        let chosen: [Int]
+        if let arr = step.weekdays, !arr.isEmpty { chosen = arr }
+        else if let one = step.weekday { chosen = [one] }
+        else { return "" }
+        let set = Set(chosen)
+        if set.count == 7 { return "Every day" }
+        if set == Set([2,3,4,5,6]) { return "Weekdays" }
+        if set == Set([1,7]) { return "Weekend" }
+        let order = [2,3,4,5,6,7,1]
+        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
+    }
+}
+
+// MARK: - Main list / navigation
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
@@ -107,6 +261,7 @@ struct ContentView: View {
                             StackCard(color: stackAccent(for: stack)) {
                                 StackRow(stack: stack)
                             }
+                            .contentShape(Rectangle()) // whole tile tappable
                         }
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                         .listRowBackground(Color.clear)
@@ -144,7 +299,9 @@ struct ContentView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .themedSurface() // colours the list itself
+            .themedSurface()                          // colours the list itself
+            .scrollDismissesKeyboard(.interactively)  // swipe down to dismiss
+            .dismissKeyboardOnTapAnywhere()           // ← new: tap anywhere to dismiss
 
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
@@ -191,7 +348,7 @@ struct ContentView: View {
             .navigationTransition(.zoom(sourceID: "addStack", in: sheetNS))
         }
 
-        // ✅ Settings: keep detent fixed + no remount on theme change
+        // Settings: keep detent fixed + no remount on theme change
         .sheet(isPresented: $showingSettings) {
             SettingsView()
                 .preferredAppearance()
@@ -264,7 +421,7 @@ struct ContentView: View {
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) }
+                defer { busyStacks.remove(stack.id) } // fixed typo
                 await AlarmScheduler.shared.cancelAll(for: stack)
             }
             modelContext.delete(stack)
@@ -289,11 +446,11 @@ struct ContentView: View {
         let s = Stack(name: "Morning")
         let now = Date()
         let def = Settings.shared
-        let wake = Step(title: "Wake", kind: .fixedTime, order: 0, createdAt: now, hour: 6, minute: 30, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+        let start = Step(title: "Start", kind: .fixedTime, order: 0, createdAt: now, hour: 6, minute: 30, allowSnooze: def.defaultAllowSnooze, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         let hydrate = Step(title: "Hydrate", kind: .relativeToPrev, order: 1, createdAt: now, offsetSeconds: 10*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
-        let stretch = Step(title: "Stretch", kind: .timer, order: 2, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+        let stretch = Step(title: "Stretch", kind: .relativeToPrev, order: 2, createdAt: now, offsetSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         let shower = Step(title: "Shower", kind: .relativeToPrev, order: 3, createdAt: now, offsetSeconds: 20*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
-        s.steps = [wake, hydrate, stretch, shower]
+        s.steps = [start, hydrate, stretch, shower]
         return s
     }
 
@@ -302,10 +459,10 @@ struct ContentView: View {
         let now = Date()
         let def = Settings.shared
         s.steps = [
-            Step(title: "Focus", kind: .timer, order: 0, createdAt: now, durationSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
-            Step(title: "Break", kind: .timer, order: 1, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
-            Step(title: "Focus", kind: .timer, order: 2, createdAt: now, durationSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
-            Step(title: "Break", kind: .timer, order: 3, createdAt: now, durationSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
+            Step(title: "Focus", kind: .relativeToPrev, order: 0, createdAt: now, offsetSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Break", kind: .relativeToPrev, order: 1, createdAt: now, offsetSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Focus", kind: .relativeToPrev, order: 2, createdAt: now, offsetSeconds: 25*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s),
+            Step(title: "Break", kind: .relativeToPrev, order: 3, createdAt: now, offsetSeconds: 5*60, allowSnooze: false, snoozeMinutes: def.defaultSnoozeMinutes, stack: s)
         ]
         return s
     }
@@ -458,143 +615,6 @@ private struct StepChip: View {
     }
 }
 
-// MARK: - Detail
-
-private struct StackDetailView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Environment(\.colorScheme)  private var systemScheme
-    @State private var calendar = Calendar.current
-    @State private var showingAddSheet = false
-
-    // Local busy flag to avoid overlapping cancel/reschedule from detail screen
-    @State private var isBusy = false
-
-    @Bindable var stack: Stack
-
-    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
-    @AppStorage("themeName")      private var themeName: String = "Default"
-    private var appearanceID: String {
-        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
-    }
-
-    var body: some View {
-        List {
-            Section {
-                Toggle(isOn: Binding(get: { stack.isArmed }, set: { newVal in
-                    guard !isBusy else { return }
-                    isBusy = true
-                    Task { @MainActor in
-                        if newVal {
-                            if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)) != nil {
-                                stack.isArmed = true
-                            }
-                        } else {
-                            await AlarmScheduler.shared.cancelAll(for: stack)
-                            stack.isArmed = false
-                        }
-                        try? modelContext.save()
-                        isBusy = false
-                    }
-                })) { Text("Armed").singleLineTightTail() }
-            }
-
-            Section("Steps") {
-                ForEach(stack.sortedSteps) { step in
-                    NavigationLink(value: step) { StepRow(step: step) }
-                }
-                .onDelete { idx in
-                    let snapshot = stack.sortedSteps
-                    for i in idx { modelContext.delete(snapshot[i]) }
-                    try? modelContext.save()
-
-                    // Auto-reschedule after deletion (guard against overlap)
-                    if stack.isArmed, !isBusy {
-                        isBusy = true
-                        Task { @MainActor in
-                            await AlarmScheduler.shared.cancelAll(for: stack)
-                            _ = try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)
-                            isBusy = false
-                        }
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .themedSurface()
-        .navigationTitle(stack.name)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { showingAddSheet = true } label: {
-                    Label("Add Step", systemImage: "plus")
-                }
-            }
-        }
-        .sheet(isPresented: $showingAddSheet) {
-            AddStepSheet(stack: stack)
-                .id(appearanceID)           // ensure rebuild on appearance changes
-                .preferredAppearance()
-                .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
-        }
-    }
-}
-
-private struct StepRow: View {
-    @Bindable var step: Step
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading) {
-                Text(step.title)
-                    .font(.headline)
-                    .singleLineTightTail()
-                Text(detailText(for: step))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .singleLineTightTail(minScale: 0.9)
-            }
-            Spacer()
-            Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
-        }
-    }
-    private func detailText(for: Step) -> String {
-        let step = `for`
-        switch step.kind {
-        case .fixedTime:
-            var time = "Fixed"
-            if let h = step.hour, let m = step.minute { time = String(format: "Fixed • %02d:%02d", h, m) }
-            let days = daysText(for: step)
-            return days.isEmpty ? time : "\(time) • \(days)"
-        case .timer:
-            if let s = step.durationSeconds { return "Timer • \(format(seconds: s))" }
-            return "Timer"
-        case .relativeToPrev:
-            if let s = step.offsetSeconds {
-                if s >= 0 { return "After previous • +\(format(seconds: s))" }
-                else { return "Before previous • −\(format(seconds: -s))" }
-            }
-            return "After previous"
-        }
-    }
-    private func format(seconds: Int) -> String {
-        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m \(s)s" }
-        return "\(s)s"
-    }
-    private func daysText(for step: Step) -> String {
-        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
-        let chosen: [Int]
-        if let arr = step.weekdays, !arr.isEmpty { chosen = arr }
-        else if let one = step.weekday { chosen = [one] }
-        else { return "" }
-        let set = Set(chosen)
-        if set.count == 7 { return "Every day" }
-        if set == Set([2,3,4,5,6]) { return "Weekdays" }
-        if set == Set([1,7]) { return "Weekend" }
-        let order = [2,3,4,5,6,7,1]
-        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
-    }
-}
-
 // MARK: - Cards, palette, background helpers
 
 private struct StackCard<Content: View>: View {
@@ -616,6 +636,7 @@ private struct StackCard<Content: View>: View {
                     .strokeBorder(color.opacity(scheme == .dark ? 0.55 : 0.45), lineWidth: 1)
             )
             .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.10), radius: 10, x: 0, y: 6)
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous)) // card shape tappable
     }
 }
 
@@ -648,7 +669,7 @@ private struct AddStackSheet: View {
     // Unified time-of-day picker
     @State private var firstStepTime: Date = Date()
 
-    // Duration / After previous (shared UI style)
+    // After previous (shared UI style)
     @State private var direction: Direction = .after
     @State private var minutesAmount: Int = 10
     @State private var secondsAmount: Int = 0
@@ -667,23 +688,22 @@ private struct AddStackSheet: View {
                         if addFirstStep {
                             Picker("Kind", selection: $firstStepKind) {
                                 Text("Fixed time").tag(StepKind.fixedTime)
-                                Text("Timer").tag(StepKind.timer)
                                 Text("After previous").tag(StepKind.relativeToPrev)
                             }
                             .pickerStyle(.segmented)
 
                             switch firstStepKind {
                             case .fixedTime:
-                                // Wheel style => spin and tap Create once.
                                 DatePicker("Time",
                                            selection: $firstStepTime,
                                            displayedComponents: .hourAndMinute)
                                     .datePickerStyle(.wheel)
                                     .labelsHidden()
-                                    .id("firstStepWheel") // ← anchor for auto-scroll
+                                    .id("firstStepWheel")
 
                             case .timer:
-                                durationEditors
+                                // Not offered anymore
+                                EmptyView()
 
                             case .relativeToPrev:
                                 Picker("Direction", selection: $direction) {
@@ -703,29 +723,22 @@ private struct AddStackSheet: View {
                         }
                     }
                 }
-                // Liquid Glass: show translucent sheet material behind
+                .scrollDismissesKeyboard(.interactively)
+                .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
                 .scrollContentBackground(.hidden)
                 .background(.clear)
-
-                // Give a little breathing room at the bottom so the wheel isn't clipped.
                 .contentMargins(.bottom, 36, for: .scrollContent)
-
-                // Ensure the wheel is fully visible at .medium without changing detent.
                 .onAppear {
                     if addFirstStep && firstStepKind == .fixedTime {
                         Task { @MainActor in
-                            try? await Task.sleep(nanoseconds: 60_000_000) // allow layout
-                            withAnimation(.snappy) {
-                                proxy.scrollTo("firstStepWheel", anchor: .bottom)
-                            }
+                            try? await Task.sleep(nanoseconds: 60_000_000)
+                            withAnimation(.snappy) { proxy.scrollTo("firstStepWheel", anchor: .bottom) }
                         }
                     }
                 }
                 .onChange(of: firstStepKind) { _, new in
                     if addFirstStep && new == .fixedTime {
-                        withAnimation(.snappy) {
-                            proxy.scrollTo("firstStepWheel", anchor: .bottom)
-                        }
+                        withAnimation(.snappy) { proxy.scrollTo("firstStepWheel", anchor: .bottom) }
                     }
                 }
             }
@@ -734,17 +747,15 @@ private struct AddStackSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Create") { create() }
-                    .disabled(addFirstStep && (firstStepKind != .fixedTime && totalSeconds == 0))
+                    .disabled(addFirstStep && firstStepKind == .relativeToPrev && totalSeconds == 0)
                 }
             }
         }
     }
 
-    // MARK: - Subviews
-
     private var durationEditors: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Duration") {
+            LabeledContent("Delay") {
                 Text(formatted(totalSeconds)).monospacedDigit().singleLineTightTail()
             }
             HStack {
@@ -763,8 +774,6 @@ private struct AddStackSheet: View {
         }
     }
 
-    // MARK: - Helpers
-
     private var totalSeconds: Int {
         max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
     }
@@ -775,14 +784,12 @@ private struct AddStackSheet: View {
         let h = s / 3600
         let m = (s % 3600) / 60
         let sec = s % 60
-
         let dur: String = {
             if h > 0 { return "\(h)h \(m)m" }
             if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
             if m > 0 { return "\(m)m" }
             return "\(sec)s"
         }()
-
         return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
     }
 
@@ -797,7 +804,7 @@ private struct AddStackSheet: View {
             switch firstStepKind {
             case .fixedTime:
                 let c = Calendar.current.dateComponents([.hour, .minute], from: firstStepTime)
-                step = Step(title: "Wake",
+                step = Step(title: "Start",
                             kind: .fixedTime,
                             order: order,
                             hour: c.hour, minute: c.minute,
@@ -805,14 +812,7 @@ private struct AddStackSheet: View {
                             snoozeMinutes: def.defaultSnoozeMinutes,
                             stack: s)
             case .timer:
-                let secs = max(1, totalSeconds)
-                step = Step(title: "Timer",
-                            kind: .timer,
-                            order: order,
-                            durationSeconds: secs,
-                            allowSnooze: def.defaultAllowSnooze,
-                            snoozeMinutes: def.defaultSnoozeMinutes,
-                            stack: s)
+                fatalError("Timer is no longer available for creation.")
             case .relativeToPrev:
                 let secs = max(0, totalSeconds)
                 let signed = (direction == .after ? 1 : -1) * secs
@@ -830,8 +830,6 @@ private struct AddStackSheet: View {
         onCreate(s)
         dismiss()
     }
-
-    // MARK: - Types
 
     private enum Direction { case after, before }
 
@@ -857,7 +855,7 @@ private struct AddStepSheet: View {
     // Fixed time (unified DatePicker)
     @State private var timeOfDay: Date = Date()
 
-    // Duration / After previous
+    // After previous
     @State private var direction: Direction = .after
     @State private var minutesAmount: Int = 10
     @State private var secondsAmount: Int = 0
@@ -871,7 +869,6 @@ private struct AddStepSheet: View {
                         .disableAutocorrection(true)
                     Picker("Kind", selection: $kind) {
                         Text("Fixed time").tag(StepKind.fixedTime)
-                        Text("Timer").tag(StepKind.timer)
                         Text("After previous").tag(StepKind.relativeToPrev)
                     }
                     .pickerStyle(.segmented)
@@ -884,9 +881,8 @@ private struct AddStepSheet: View {
                             .datePickerStyle(.compact)
                     }
                 case .timer:
-                    Section("Duration") {
-                        durationEditors
-                    }
+                    // Not offered anymore; keep case to satisfy exhaustiveness.
+                    EmptyView()
                 case .relativeToPrev:
                     Section("After previous") {
                         Picker("Direction", selection: $direction) {
@@ -905,7 +901,8 @@ private struct AddStepSheet: View {
                     }
                 }
             }
-            // Liquid Glass: show translucent sheet material behind
+            .scrollDismissesKeyboard(.interactively)
+            .dismissKeyboardOnTapAnywhere() // ← tap anywhere to dismiss keyboard
             .scrollContentBackground(.hidden)
             .background(.clear)
 
@@ -922,11 +919,9 @@ private struct AddStepSheet: View {
         }
     }
 
-    // MARK: - Subviews
-
     private var durationEditors: some View {
         VStack(alignment: .leading, spacing: 8) {
-            LabeledContent("Duration") {
+            LabeledContent("Delay") {
                 Text(formatted(totalSeconds))
                     .monospacedDigit()
                     .singleLineTightTail()
@@ -947,17 +942,13 @@ private struct AddStepSheet: View {
         }
     }
 
-    // MARK: - Helpers
-
     private var totalSeconds: Int {
         max(0, minutesAmount) * 60 + max(0, min(59, secondsAmount))
     }
 
     private var invalidDuration: Bool {
-        if kind == .timer || kind == .relativeToPrev {
-            return totalSeconds == 0
-        }
-        return false
+        // Only applies to "After previous" now
+        return (kind == .relativeToPrev) && totalSeconds == 0
     }
 
     private var humanReadableRelative: String {
@@ -966,14 +957,12 @@ private struct AddStepSheet: View {
         let h = s / 3600
         let m = (s % 3600) / 60
         let sec = s % 60
-
         let dur: String = {
             if h > 0 { return "\(h)h \(m)m" }
             if m > 0 && sec > 0 { return "\(m)m \(sec)s" }
             if m > 0 { return "\(m)m" }
             return "\(sec)s"
         }()
-
         return direction == .after ? "\(dur) after previous" : "\(dur) before previous"
     }
 
@@ -981,7 +970,7 @@ private struct AddStepSheet: View {
         let order = (stack.sortedSteps.last?.order ?? -1) + 1
         let def = Settings.shared
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let safeTitle = trimmed.isEmpty ? (kind == .fixedTime ? "Alarm" : (kind == .timer ? "Timer" : "After previous")) : trimmed
+        let safeTitle = trimmed.isEmpty ? (kind == .fixedTime ? "Start" : "After previous") : trimmed
 
         let step: Step
         switch kind {
@@ -997,14 +986,7 @@ private struct AddStepSheet: View {
                         stack: stack)
 
         case .timer:
-            let secs = max(1, totalSeconds)
-            step = Step(title: safeTitle,
-                        kind: .timer,
-                        order: order,
-                        durationSeconds: secs,
-                        allowSnooze: def.defaultAllowSnooze,
-                        snoozeMinutes: def.defaultSnoozeMinutes,
-                        stack: stack)
+            fatalError("Timer is no longer available for creation.")
 
         case .relativeToPrev:
             let secs = max(0, totalSeconds)

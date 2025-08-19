@@ -45,7 +45,7 @@ struct NextAlarmProvider: TimelineProvider {
     }
 }
 
-// MARK: - Style helpers
+// MARK: - Style helpers (static widget)
 
 private struct Card<Content: View>: View {
     let content: Content
@@ -76,7 +76,7 @@ private struct ContainerBG: ViewModifier {
     }
 }
 
-// MARK: - Widget view
+// MARK: - Widget view (static)
 
 struct NextAlarmWidgetView: View {
     var entry: NextAlarmProvider.Entry
@@ -108,32 +108,34 @@ struct NextAlarmWidgetView: View {
                 Text(info.stackName)
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
-                    .lineLimit(1)
+                    .singleLineTightTail()
 
                 Text(info.stepTitle)
                     .font(.subheadline)
                     .fontDesign(.rounded)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .singleLineTightTail()
 
                 if entry.date < info.fireDate {
                     Text(info.fireDate, style: .timer)
                         .monospacedDigit()
                         .font(timerFont)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
+                        .singleLineTightTail(minScale: 0.7)
                 } else {
                     Text(info.fireDate, style: .time)
+                        .monospacedDigit()
                         .font(timerFont.weight(.bold))
-                        .lineLimit(1)
+                        .singleLineTightTail(minScale: 0.7)
                 }
             } else {
                 Text("No upcoming step")
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
+                    .singleLineTightTail()
                 Text("Open AlarmStacks")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .singleLineTightTail()
             }
         }
         .padding(10)
@@ -153,7 +155,7 @@ struct NextAlarmWidget: Widget {
     }
 }
 
-// MARK: - Live Activity
+// MARK: - Live Activity (no Stop/Snooze actions on bubble)
 
 #if canImport(ActivityKit)
 @available(iOSApplicationExtension 16.1, *)
@@ -166,12 +168,10 @@ private struct AlarmActivityLockRoot: View {
     // Ultra-light glass tint to match system notifications.
     private var glassTint: Color {
         #if canImport(UIKit)
-        // Start from theme background so there’s a tiny hue bias, but keep alpha very low.
         let base = (scheme == .dark ? context.state.theme.bgDark.color : context.state.theme.bgLight.color)
         let alpha: CGFloat = (scheme == .dark) ? 0.06 : 0.05
         return Color(UIColor(base).withAlphaComponent(alpha))
         #else
-        // Fallback if UIKit isn’t available in some future context.
         return (scheme == .dark)
             ? Color(.sRGB, red: 1, green: 1, blue: 1, opacity: 0.06)
             : Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 0.05)
@@ -179,48 +179,96 @@ private struct AlarmActivityLockRoot: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(context.state.stackName)
-                    .font(.title3.weight(.semibold))
-                    .fontDesign(.rounded)
-                    .lineLimit(1)
-                Text(context.state.stepTitle)
-                    .font(.body)
-                    .fontDesign(.rounded)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 8)
+        VStack(spacing: 12) {
+            // Row: Glyph + titles + right-rail timer
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                GlassGlyph(accent: accent)
 
-            if let fired = context.state.firedAt {
-                Text(fired, style: .time)
-                    .monospaced()
-                    .font(.title.weight(.bold))
-                    .multilineTextAlignment(.trailing)
-            } else if context.state.ends > Date() {
-                Text(context.state.ends, style: .timer)
-                    .monospacedDigit()
-                    .font(.title.weight(.bold))
-                    .minimumScaleFactor(0.5)
-                    .lineLimit(1)
-                    .multilineTextAlignment(.trailing)
-            } else {
-                Text(context.state.ends, style: .time)
-                    .monospaced()
-                    .font(.title.weight(.bold))
-                    .multilineTextAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 4) {
+                    StatusChip(text: (context.state.firedAt != nil) ? "Ringing" : "Next step")
+                    Text(context.state.stackName)
+                        .font(.title3.weight(.semibold))
+                        .fontDesign(.rounded)
+                        .singleLineTightTail()
+                    Text(context.state.stepTitle)
+                        .font(.body)
+                        .fontDesign(.rounded)
+                        .foregroundStyle(.secondary)
+                        .singleLineTightTail()
+                }
+
+                Spacer(minLength: 8)
+
+                Group {
+                    if let fired = context.state.firedAt {
+                        Text(fired, style: .time).monospacedDigit()
+                    } else if context.state.ends > Date() {
+                        Text(context.state.ends, style: .timer).monospacedDigit()
+                    } else {
+                        Text(context.state.ends, style: .time).monospacedDigit()
+                    }
+                }
+                .font(.title.weight(.bold))
+                .minimumScaleFactor(0.7)
+                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
             }
+            // No Stop/Snooze action row here by design.
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .padding(.horizontal, 14)
-        .tint(accent)
-        .activityBackgroundTint(glassTint)                 // ← super transparent, matches Notification Center
+        .tint(accent)                              // glyph picks up theme accent
+        .activityBackgroundTint(glassTint)         // super transparent glass
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
     }
 }
+
+// Accent glyph with subtle glass ring (stroke-only, no opaque fill).
+@available(iOSApplicationExtension 16.1, *)
+private struct GlassGlyph: View {
+    let accent: Color
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(accent.opacity(0.28), lineWidth: 1.5)
+                .overlay(
+                    Circle().strokeBorder(.white.opacity(0.08), lineWidth: 1)
+                )
+                .frame(width: 34, height: 34)
+            Image(systemName: "alarm.fill")
+                .imageScale(.medium)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(accent)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+// Small glassy status capsule (“Ringing” / “Next step”), stroke only.
+@available(iOSApplicationExtension 16.1, *)
+private struct StatusChip: View {
+    let text: String
+    var body: some View {
+        Text(text.uppercased())
+            .font(.caption2.weight(.semibold))
+            .tracking(0.8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.clear)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.20), lineWidth: 1)
+                    )
+            )
+            .singleLineTightTail()
+    }
+}
 #endif
+
+// MARK: - Activity + Island
 
 @available(iOSApplicationExtension 16.1, *)
 struct AlarmActivityWidget: Widget {
@@ -235,69 +283,61 @@ struct AlarmActivityWidget: Widget {
             #if canImport(ActivityKit)
             let accent = context.state.theme.accent.color
 
-            // Dynamic Island keeps the system Liquid Glass background.
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "alarm.fill")
-                        .imageScale(.large)
-                        .foregroundStyle(accent)
+                    GlassGlyph(accent: accent)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        StatusChip(text: (context.state.firedAt != nil) ? "Ringing" : "Next step")
                         Text(context.state.stackName)
                             .font(.headline.weight(.semibold))
                             .fontDesign(.rounded)
-                            .lineLimit(1)
+                            .singleLineTightTail()
                         Text(context.state.stepTitle)
                             .font(.subheadline)
                             .fontDesign(.rounded)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .singleLineTightTail()
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    HStack(spacing: 12) {
-                        Link(destination: URL(string: "alarmstacks://action/stop?alarmID=\(context.state.alarmID)")!) {
-                            Image(systemName: "stop.fill").font(.title3.weight(.semibold))
-                        }
-                        if context.state.allowSnooze {
-                            Link(destination: URL(string: "alarmstacks://action/snooze?alarmID=\(context.state.alarmID)")!) {
-                                Image(systemName: "zzz").font(.title3.weight(.semibold))
-                            }
-                        }
-                    }
-                    .tint(accent)
+                    // Intentionally empty: no Stop/Snooze icons.
+                    EmptyView()
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
-                        if let fired = context.state.firedAt {
-                            Text(fired, style: .time)
-                                .monospaced()
-                                .font(.title3.weight(.semibold))
-                        } else if context.state.ends > Date() {
-                            Text(context.state.ends, style: .timer)
-                                .monospacedDigit()
-                                .font(.title3.weight(.semibold))
-                                .minimumScaleFactor(0.7)
-                                .lineLimit(1)
-                        } else {
-                            Text(context.state.ends, style: .time)
-                                .monospaced()
-                                .font(.title3.weight(.semibold))
+                        Group {
+                            if let fired = context.state.firedAt {
+                                Text(fired, style: .time).monospacedDigit()
+                            } else if context.state.ends > Date() {
+                                Text(context.state.ends, style: .timer)
+                                    .monospacedDigit()
+                                    .minimumScaleFactor(0.7)
+                                    .lineLimit(1)
+                            } else {
+                                Text(context.state.ends, style: .time).monospacedDigit()
+                            }
                         }
+                        .font(.title3.weight(.semibold))
                         Spacer(minLength: 0)
                     }
                 }
             } compactLeading: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
             } compactTrailing: {
-                if let fired = context.state.firedAt {
-                    Text(fired, style: .time).monospaced()
-                } else if context.state.ends > Date() {
-                    Text(context.state.ends, style: .timer).monospacedDigit()
-                } else {
-                    Text(context.state.ends, style: .time).monospaced()
+                Group {
+                    if let fired = context.state.firedAt {
+                        Text(fired, style: .time).monospacedDigit()
+                    } else if context.state.ends > Date() {
+                        Text(context.state.ends, style: .timer).monospacedDigit()
+                    } else {
+                        Text(context.state.ends, style: .time).monospacedDigit()
+                    }
                 }
+                .minimumScaleFactor(0.7)
+                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
             } minimal: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
             }

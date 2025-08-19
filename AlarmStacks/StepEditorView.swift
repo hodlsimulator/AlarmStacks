@@ -7,6 +7,9 @@
 
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 struct StepEditorView: View {
@@ -28,7 +31,7 @@ struct StepEditorView: View {
             case .fixedTime:
                 fixedTimeSection
                 weekdaysSection
-            case .timer:
+            case .timer: // existing timers remain editable (legacy)
                 timerSection
                 cadenceSection
             case .relativeToPrev:
@@ -45,7 +48,9 @@ struct StepEditorView: View {
                 }
             }
         }
-        .themedSurface()   // ← pushed via navigation, not a sheet
+        .scrollDismissesKeyboard(.interactively)
+        .dismissKeyboardOnTapAnywhere()      // ← tap anywhere to dismiss keyboard (doesn’t block taps)
+        .themedSurface()                     // ← pushed via navigation, not a sheet
     }
 
     // MARK: - Sections
@@ -62,18 +67,26 @@ struct StepEditorView: View {
 
     private var kindSection: some View {
         Section("Step type") {
-            Picker("Type", selection: $step.kind) {
-                Text("Fixed time").tag(StepKind.fixedTime)
-                Text("Timer").tag(StepKind.timer)
-                Text("After previous").tag(StepKind.relativeToPrev)
+            // No "Timer" option for new or non-timer steps.
+            // If the step is a legacy Timer, show a read-only label instead of a picker.
+            if step.kind == .timer {
+                LabeledContent("Type") {
+                    Text("Timer (legacy)")
+                        .foregroundStyle(.secondary)
+                        .singleLineTightTail()
+                }
+            } else {
+                Picker("Type", selection: $step.kind) {
+                    Text("Fixed time").tag(StepKind.fixedTime)
+                    Text("After previous").tag(StepKind.relativeToPrev)
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
         }
     }
 
     private var fixedTimeSection: some View {
         Section("Fixed time") {
-            // Wheel style allows immediate Done tap (no extra tap to dismiss a popover).
             DatePicker(
                 "Time",
                 selection: Binding<Date>(
@@ -308,7 +321,6 @@ private struct WeekdayChips: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
 
-            // Horizontal scroll prevents compression/truncation of the 3-letter labels.
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(days, id: \.num) { d in
@@ -317,10 +329,10 @@ private struct WeekdayChips: View {
                         } label: {
                             Text(d.short)
                                 .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)                 // never wrap
-                                .minimumScaleFactor(0.8)      // allow a touch of tightening before clip
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                                 .allowsTightening(true)
-                                .fixedSize(horizontal: true, vertical: false) // no truncation
+                                .fixedSize(horizontal: true, vertical: false)
                                 .padding(.vertical, 6)
                                 .padding(.horizontal, 10)
                                 .background(selected.contains(d.num) ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12))
