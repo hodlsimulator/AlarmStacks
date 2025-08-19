@@ -84,6 +84,7 @@
 				AppGroups.swift,
 				NextAlarmBridge.swift,
 				ThemePayload.swift,
+				"View+SingleLineTightTail.swift",
 			);
 			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
 		};
