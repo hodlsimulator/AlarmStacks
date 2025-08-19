@@ -35,8 +35,6 @@ struct NextAlarmProvider: TimelineProvider {
     func getTimeline(in context: Context, completion: @escaping (Timeline<NextAlarmEntry>) -> Void) {
         let info = NextAlarmBridge.read()
 
-        // We emit TWO entries so the widget flips from countdown to fixed time
-        // right after the fire time (no count-up).
         var entries: [NextAlarmEntry] = [NextAlarmEntry(date: .now, info: info)]
         if let fire = info?.fireDate {
             entries.append(NextAlarmEntry(date: fire.addingTimeInterval(0.5), info: info))
@@ -110,15 +108,14 @@ struct NextAlarmWidgetView: View {
                 Text(info.stackName)
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
-                    .singleLineTightTail()
+                    .lineLimit(1)
 
                 Text(info.stepTitle)
                     .font(.subheadline)
                     .fontDesign(.rounded)
                     .foregroundStyle(.secondary)
-                    .singleLineTightTail()
+                    .lineLimit(1)
 
-                // Use the ENTRY time (not Date()) so we never count up.
                 if entry.date < info.fireDate {
                     Text(info.fireDate, style: .timer)
                         .monospacedDigit()
@@ -126,7 +123,6 @@ struct NextAlarmWidgetView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 } else {
-                    // After it fires, show the time it rang (fixed clock), not "ago".
                     Text(info.fireDate, style: .time)
                         .font(timerFont.weight(.bold))
                         .lineLimit(1)
@@ -135,11 +131,9 @@ struct NextAlarmWidgetView: View {
                 Text("No upcoming step")
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
-                    .singleLineTightTail()
                 Text("Open AlarmStacks")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .singleLineTightTail()
             }
         }
         .padding(10)
@@ -168,8 +162,20 @@ private struct AlarmActivityLockRoot: View {
     @Environment(\.colorScheme) private var scheme
 
     private var accent: Color { context.state.theme.accent.color }
-    private var bg: Color {
-        (scheme == .dark ? context.state.theme.bgDark.color : context.state.theme.bgLight.color)
+
+    // Ultra-light glass tint to match system notifications.
+    private var glassTint: Color {
+        #if canImport(UIKit)
+        // Start from theme background so there’s a tiny hue bias, but keep alpha very low.
+        let base = (scheme == .dark ? context.state.theme.bgDark.color : context.state.theme.bgLight.color)
+        let alpha: CGFloat = (scheme == .dark) ? 0.06 : 0.05
+        return Color(UIColor(base).withAlphaComponent(alpha))
+        #else
+        // Fallback if UIKit isn’t available in some future context.
+        return (scheme == .dark)
+            ? Color(.sRGB, red: 1, green: 1, blue: 1, opacity: 0.06)
+            : Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 0.05)
+        #endif
     }
 
     var body: some View {
@@ -178,12 +184,12 @@ private struct AlarmActivityLockRoot: View {
                 Text(context.state.stackName)
                     .font(.title3.weight(.semibold))
                     .fontDesign(.rounded)
-                    .singleLineTightTail()
+                    .lineLimit(1)
                 Text(context.state.stepTitle)
                     .font(.body)
                     .fontDesign(.rounded)
                     .foregroundStyle(.secondary)
-                    .singleLineTightTail()
+                    .lineLimit(1)
             }
             Spacer(minLength: 8)
 
@@ -209,7 +215,7 @@ private struct AlarmActivityLockRoot: View {
         .padding(.vertical, 10)
         .padding(.horizontal, 14)
         .tint(accent)
-        .activityBackgroundTint(bg)                    // Allowed on Lock Screen view
+        .activityBackgroundTint(glassTint)                 // ← super transparent, matches Notification Center
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
     }
@@ -229,18 +235,7 @@ struct AlarmActivityWidget: Widget {
             #if canImport(ActivityKit)
             let accent = context.state.theme.accent.color
 
-            // Dynamic background that adapts to light/dark (island doesn’t support activityBackgroundTint)
-            #if canImport(UIKit)
-            let bg = Color(UIColor { trait in
-                let isDark = (trait.userInterfaceStyle == .dark)
-                return isDark
-                ? UIColor(context.state.theme.bgDark.color)
-                : UIColor(context.state.theme.bgLight.color)
-            })
-            #else
-            let bg = context.state.theme.bgLight.color
-            #endif
-
+            // Dynamic Island keeps the system Liquid Glass background.
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: "alarm.fill")
@@ -252,12 +247,12 @@ struct AlarmActivityWidget: Widget {
                         Text(context.state.stackName)
                             .font(.headline.weight(.semibold))
                             .fontDesign(.rounded)
-                            .singleLineTightTail()
+                            .lineLimit(1)
                         Text(context.state.stepTitle)
                             .font(.subheadline)
                             .fontDesign(.rounded)
                             .foregroundStyle(.secondary)
-                            .singleLineTightTail()
+                            .lineLimit(1)
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -306,8 +301,7 @@ struct AlarmActivityWidget: Widget {
             } minimal: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
             }
-            .keylineTint(accent)                          // Allowed on DynamicIsland
-            // No .activityBackgroundTint here (not supported on DynamicIsland)
+            .keylineTint(accent)
             #else
             DynamicIsland {}
             #endif
