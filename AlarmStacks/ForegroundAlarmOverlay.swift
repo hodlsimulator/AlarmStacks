@@ -36,26 +36,39 @@ struct ForegroundAlarmOverlay: ViewModifier {
     private func overlay(for alarm: Alarm) -> some View {
         VStack {
             Spacer(minLength: 0)
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
+                // Leading text compresses first so buttons never wrap
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Alarm ringing").font(.headline)
-                    Text("Tap to stop or snooze").font(.subheadline).foregroundStyle(.secondary)
+                    Text("Alarm ringing")
+                        .font(.headline)
+                        .singleLineTightTail(minScale: 0.85)
+                    Text("Tap to stop or snooze")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .singleLineTightTail(minScale: 0.85)
                 }
-                Spacer()
+                .layoutPriority(0)
+
+                Spacer(minLength: 8)
+
+                // STOP (prominent)
                 Button {
                     AlarmController.shared.stop(alarm.id)
                 } label: {
-                    Label("Stop", systemImage: "stop.circle.fill").font(.title3.bold())
+                    StopButtonLabel()
                 }
                 .buttonStyle(.borderedProminent)
+                .layoutPriority(1) // keep on one line
 
+                // SNOOZE (only if allowed)
                 if alarm.countdownDuration?.postAlert != nil {
                     Button {
                         AlarmController.shared.snooze(alarm.id)
                     } label: {
-                        Label("Snooze", systemImage: "zzz").font(.title3.bold())
+                        SnoozeButtonLabel()
                     }
                     .buttonStyle(.bordered)
+                    .layoutPriority(1) // keep on one line
                 }
             }
             .padding()
@@ -68,6 +81,43 @@ struct ForegroundAlarmOverlay: ViewModifier {
     #endif
 }
 
+#if canImport(AlarmKit)
+// MARK: - Button Labels (no-wrap, icon + title)
+
+private struct StopButtonLabel: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "stop.circle.fill")
+                .imageScale(.medium)
+            Text("Stop")
+                .font(.title3.bold())
+                .singleLineTightTail(minScale: 0.85)
+                .layoutPriority(1)
+        }
+        // Prevent vertical growth that could invite wrapping
+        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct SnoozeButtonLabel: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "zzz")
+                .imageScale(.medium)
+            Text("Snooze")
+                .font(.title3.bold())
+                .singleLineTightTail(minScale: 0.85) // tighten, then scale slightly, then ellipsis
+                .layoutPriority(1)
+        }
+        // Prevent vertical growth that could invite wrapping
+        .fixedSize(horizontal: false, vertical: true)
+        .contentShape(Rectangle())
+    }
+}
+#endif
+
 extension View {
     func alarmStopOverlay() -> some View { modifier(ForegroundAlarmOverlay()) }
 }
+    

@@ -45,7 +45,7 @@ struct StepEditorView: View {
                 }
             }
         }
-        .themedSurface()   // ← gives the edit screen the same themed background
+        .themedSurface()   // ← pushed via navigation, not a sheet
     }
 
     // MARK: - Sections
@@ -98,9 +98,12 @@ struct StepEditorView: View {
                 }
             ))
         } header: {
-            Text("Repeat on")
+            Text("Repeat on").singleLineTightTail()
         } footer: {
             Text("Leave all off to allow any day.")
+                .singleLineTightTail()
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -124,7 +127,7 @@ struct StepEditorView: View {
                     step.everyNDays = on ? max(2, step.everyNDays ?? 2) : nil
                 }
             )) {
-                Text("Gate timer to a day cadence")
+                Text("Gate timer to a day cadence").singleLineTightTail()
             }
 
             if (step.everyNDays ?? 0) > 1 {
@@ -132,7 +135,7 @@ struct StepEditorView: View {
                     get: { max(2, step.everyNDays ?? 2) },
                     set: { step.everyNDays = max(2, $0) }
                 ), in: 2...365) {
-                    Text("Every \(step.everyNDays ?? 2) days")
+                    Text("Every \(step.everyNDays ?? 2) days").singleLineTightTail()
                 }
             }
         }
@@ -168,6 +171,7 @@ struct StepEditorView: View {
                 .foregroundStyle(.secondary)
                 .padding(.top, 2)
                 .accessibilityLabel("Human-readable delay")
+                .singleLineTightTail()
         }
     }
 
@@ -177,9 +181,9 @@ struct StepEditorView: View {
 
             Stepper(value: $step.snoozeMinutes, in: 1...30) {
                 if step.snoozeMinutes == 1 {
-                    Text("Snooze for 1 minute")
+                    Text("Snooze for 1 minute").singleLineTightTail()
                 } else {
-                    Text("Snooze for \(step.snoozeMinutes) minutes")
+                    Text("Snooze for \(step.snoozeMinutes) minutes").singleLineTightTail()
                 }
             }
             .disabled(!step.allowSnooze)
@@ -240,7 +244,7 @@ private enum Direction: Hashable {
     case before
 }
 
-// MARK: - DurationEditor / WeekdayChips (unchanged below)
+// MARK: - DurationEditor / WeekdayChips
 
 private struct DurationEditor: View {
     let label: String
@@ -251,6 +255,7 @@ private struct DurationEditor: View {
             LabeledContent(label) {
                 Text(formatted(seconds: seconds))
                     .monospacedDigit()
+                    .singleLineTightTail()
             }
 
             HStack {
@@ -263,6 +268,7 @@ private struct DurationEditor: View {
                 ), in: 0...720) {
                     Text("Minutes: \(seconds / 60)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
 
                 Stepper(value: Binding(
@@ -274,6 +280,7 @@ private struct DurationEditor: View {
                 ), in: 0...59) {
                     Text("Seconds: \(seconds % 60)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
             }
             .labelStyle(.titleOnly)
@@ -300,21 +307,30 @@ private struct WeekdayChips: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                ForEach(days, id: \.num) { d in
-                    Button {
-                        toggle(d.num)
-                    } label: {
-                        Text(d.short)
-                            .font(.subheadline)
-                            .padding(.vertical, 6)
-                            .padding(.horizontal, 10)
-                            .background(selected.contains(d.num) ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12))
-                            .foregroundStyle(selected.contains(d.num) ? .primary : .secondary)
-                            .clipShape(Capsule())
+
+            // Horizontal scroll prevents compression/truncation of the 3-letter labels.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(days, id: \.num) { d in
+                        Button {
+                            toggle(d.num)
+                        } label: {
+                            Text(d.short)
+                                .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)                 // never wrap
+                                .minimumScaleFactor(0.8)      // allow a touch of tightening before clip
+                                .allowsTightening(true)
+                                .fixedSize(horizontal: true, vertical: false) // no truncation
+                                .padding(.vertical, 6)
+                                .padding(.horizontal, 10)
+                                .background(selected.contains(d.num) ? Color.accentColor.opacity(0.2) : Color.secondary.opacity(0.12))
+                                .foregroundStyle(selected.contains(d.num) ? .primary : .secondary)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.vertical, 2)
             }
 
             HStack(spacing: 12) {

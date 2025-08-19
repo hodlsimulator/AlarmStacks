@@ -28,6 +28,9 @@ struct ContentView: View {
 
     // Prevent overlapping schedule/cancel on the same stack from different UI entry points
     @State private var busyStacks: Set<UUID> = []
+
+    // Keep the Settings sheet detent pinned even if the view updates
+    @State private var settingsDetent: PresentationDetent = .medium
     
     @Namespace private var sheetNS
 
@@ -38,6 +41,17 @@ struct ContentView: View {
     @AppStorage("themeName")      private var themeName: String = "Default"
     private var appearanceID: String {
         "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
+    }
+
+    // Bulk state used for the single toggle row
+    private enum BulkState { case none, some, all }
+    private var bulkState: BulkState {
+        let total = stacks.count
+        guard total > 0 else { return .none }
+        let armed = stacks.filter { $0.isArmed }.count
+        if armed == 0 { return .none }
+        if armed == total { return .all }
+        return .some
     }
 
     var body: some View {
@@ -62,17 +76,28 @@ struct ContentView: View {
                     )
                     .listRowBackground(Color.clear)
                 } else {
-                    // Global controls
+                    // Global control: single toggle with clear, large hit area
                     Section {
-                        HStack {
-                            Button { armAll() } label: {
-                                Label("Arm All", systemImage: "bell.fill")
+                        Toggle(
+                            isOn: Binding(
+                                get: { bulkState == .all && !stacks.isEmpty },
+                                set: { on in
+                                    if on { armAll() } else { disarmAll() }
+                                }
+                            )
+                        ) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "bell.fill")
+                                Text("All stacks armed")
+                                    .layoutPriority(1)
+                                    .singleLineTightTail()
+                                if bulkState == .some {
+                                    Text("(Mixed)")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .singleLineTightTail()
+                                }
                             }
-                            Spacer()
-                            Button { disarmAll() } label: {
-                                Label("Disarm All", systemImage: "bell.slash.fill")
-                            }
-                            .tint(.orange)
                         }
                     }
                     .listRowBackground(Color.clear)
@@ -108,6 +133,7 @@ struct ContentView: View {
                             HStack {
                                 Label("Free limit: 2 stacks", systemImage: "star")
                                     .foregroundStyle(.secondary)
+                                    .singleLineTightTail()
                                 Spacer()
                                 Button("Get Plus") { showingPaywall = true }
                                     .buttonStyle(.borderedProminent)
@@ -122,9 +148,6 @@ struct ContentView: View {
 
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
-
-            // NOTE: removed toolbarBackground material to avoid covering the large title.
-            // The themed background now shows cleanly behind the title area.
 
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -167,12 +190,14 @@ struct ContentView: View {
             // iOS 26: destination of the zoom transition (morphs from the add button)
             .navigationTransition(.zoom(sourceID: "addStack", in: sheetNS))
         }
+
+        // ✅ Settings: keep detent fixed + no remount on theme change
         .sheet(isPresented: $showingSettings) {
             SettingsView()
-                .id(appearanceID)
                 .preferredAppearance()
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.medium, .large], selection: $settingsDetent)
         }
+
         .sheet(isPresented: $showingPaywall) {
             PaywallView()
                 .id(appearanceID)
@@ -239,7 +264,7 @@ struct ContentView: View {
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) }    // ✅ fixed typo
+                defer { busyStacks.remove(stack.id) }
                 await AlarmScheduler.shared.cancelAll(for: stack)
             }
             modelContext.delete(stack)
@@ -306,22 +331,30 @@ private struct StackRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text(stack.name).font(.headline)
+                Text(stack.name)
+                    .font(.headline)
+                    .layoutPriority(1)
+                    .singleLineTightTail() // keep name to one line / ellipsis
+
                 if stack.isArmed {
                     Image(systemName: "bell.and.waves.left.and.right.fill")
                         .imageScale(.small)
                         .foregroundStyle(.tint)
                 }
+
                 Spacer()
+
                 Text("\(stack.sortedSteps.count) step\(stack.sortedSteps.count == 1 ? "" : "s")")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                    .singleLineTightTail()
             }
 
             if let next = nextStart(for: stack) {
                 Text("Next: \(formatted(next))")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .singleLineTightTail()
             }
 
             ScrollView(.horizontal, showsIndicators: false) {
@@ -365,7 +398,10 @@ private struct StepChip: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: icon(for: step)).imageScale(.small)
-            Text(label(for: step)).font(.caption).lineLimit(1)
+            Text(label(for: step))
+                .font(.caption)
+                .layoutPriority(1)
+                .singleLineTightTail(minScale: 0.85)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -459,7 +495,7 @@ private struct StackDetailView: View {
                         try? modelContext.save()
                         isBusy = false
                     }
-                })) { Text("Armed") }
+                })) { Text("Armed").singleLineTightTail() }
             }
 
             Section("Steps") {
@@ -507,8 +543,13 @@ private struct StepRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text(step.title).font(.headline)
-                Text(detailText(for: step)).font(.subheadline).foregroundStyle(.secondary)
+                Text(step.title)
+                    .font(.headline)
+                    .singleLineTightTail()
+                Text(detailText(for: step))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .singleLineTightTail(minScale: 0.9)
             }
             Spacer()
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
@@ -657,10 +698,15 @@ private struct AddStackSheet: View {
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
                                     .padding(.top, 2)
+                                    .singleLineTightTail()
                             }
                         }
                     }
                 }
+                // Liquid Glass: show translucent sheet material behind
+                .scrollContentBackground(.hidden)
+                .background(.clear)
+
                 // Give a little breathing room at the bottom so the wheel isn't clipped.
                 .contentMargins(.bottom, 36, for: .scrollContent)
 
@@ -699,16 +745,18 @@ private struct AddStackSheet: View {
     private var durationEditors: some View {
         VStack(alignment: .leading, spacing: 8) {
             LabeledContent("Duration") {
-                Text(formatted(totalSeconds)).monospacedDigit()
+                Text(formatted(totalSeconds)).monospacedDigit().singleLineTightTail()
             }
             HStack {
                 Stepper(value: $minutesAmount, in: 0...720) {
                     Text("Minutes: \(minutesAmount)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
                 Stepper(value: $secondsAmount, in: 0...59) {
                     Text("Seconds: \(secondsAmount)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
             }
             .labelStyle(.titleOnly)
@@ -853,9 +901,14 @@ private struct AddStepSheet: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .padding(.top, 2)
+                            .singleLineTightTail()
                     }
                 }
             }
+            // Liquid Glass: show translucent sheet material behind
+            .scrollContentBackground(.hidden)
+            .background(.clear)
+
             .navigationTitle("Add Step")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -876,15 +929,18 @@ private struct AddStepSheet: View {
             LabeledContent("Duration") {
                 Text(formatted(totalSeconds))
                     .monospacedDigit()
+                    .singleLineTightTail()
             }
             HStack {
                 Stepper(value: $minutesAmount, in: 0...720) {
                     Text("Minutes: \(minutesAmount)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
                 Stepper(value: $secondsAmount, in: 0...59) {
                     Text("Seconds: \(secondsAmount)")
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .singleLineTightTail()
                 }
             }
             .labelStyle(.titleOnly)
@@ -1000,9 +1056,10 @@ private struct EmptyState: View {
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "alarm.fill").font(.largeTitle)
-            Text("No stacks yet").font(.headline)
+            Text("No stacks yet").font(.headline).singleLineTightTail()
             Text("Create a stack or add sample ones to get started.")
                 .foregroundStyle(.secondary)
+                .singleLineTightTail()
             HStack {
                 Button("Add Sample Stacks", action: addSamples)
                 Button("Create New", action: createNew)

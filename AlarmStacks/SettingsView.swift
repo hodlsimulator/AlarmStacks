@@ -31,12 +31,13 @@ struct SettingsView: View {
                     HStack {
                         Label(store.isPlus ? "AlarmStacks Plus" : "Get AlarmStacks Plus", systemImage: store.isPlus ? "star.fill" : "star")
                             .foregroundStyle(store.isPlus ? .yellow : .primary)
+                            .singleLineTightTail()
                         Spacer()
                         if !store.isPlus {
                             Button("Learn more") { showingPaywall = true }
                                 .buttonStyle(.borderedProminent)
                         } else {
-                            Text("Active").foregroundStyle(.secondary)
+                            Text("Active").foregroundStyle(.secondary).singleLineTightTail()
                         }
                     }
                 }
@@ -54,10 +55,12 @@ struct SettingsView: View {
                     Toggle("Allow Snooze", isOn: $settings.defaultAllowSnooze)
                     Stepper(value: $settings.defaultSnoozeMinutes, in: 1...30) {
                         Text("Snooze Minutes: \(settings.defaultSnoozeMinutes)")
+                            .singleLineTightTail()
                     }
                     Text("These are just defaults for newly created steps. Each step’s own snooze value overrides this.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .singleLineTightTail()
                 }
 
                 // Sound info
@@ -76,6 +79,7 @@ struct SettingsView: View {
                     Text("Alarms use your iPhone’s **Ringer & Alerts** volume. To keep them loud, raise the slider in **Settings → Sounds & Haptics** and consider turning **Change with Buttons** off so accidental button presses don’t lower it. If alarms seem to fade when you look at the phone, turn off **Attention Aware Features** in **Settings → Face ID & Attention**.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                        .singleLineTightTail()
                 }
 
                 // Diagnostics
@@ -89,6 +93,10 @@ struct SettingsView: View {
                     }
                 }
             }
+            // Liquid Glass sheet look (no opaque backgrounds inside)
+            .scrollContentBackground(.hidden)
+            .background(.clear)
+
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -96,11 +104,12 @@ struct SettingsView: View {
                 }
             }
             .task { await store.load() }
-            .themedSurface()                // ← pastel background in BOTH schemes
         }
+        // Don’t animate layout when switching appearance to avoid any jiggle
+        .animation(nil, value: mode)
         .sheet(isPresented: $showingPaywall) {
             PaywallView()
-                .id(appearanceID)           // rebuild when mode/system/theme changes
+                .id(appearanceID)           // paywall can still rebuild on theme changes
                 .preferredAppearance()
                 .presentationDetents([.medium, .large])
         }
