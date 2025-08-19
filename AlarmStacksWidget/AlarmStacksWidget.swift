@@ -110,13 +110,13 @@ struct NextAlarmWidgetView: View {
                 Text(info.stackName)
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
-                    .lineLimit(1)
+                    .singleLineTightTail()
 
                 Text(info.stepTitle)
                     .font(.subheadline)
                     .fontDesign(.rounded)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .singleLineTightTail()
 
                 // Use the ENTRY time (not Date()) so we never count up.
                 if entry.date < info.fireDate {
@@ -135,9 +135,11 @@ struct NextAlarmWidgetView: View {
                 Text("No upcoming step")
                     .font(.headline.weight(.semibold))
                     .fontDesign(.rounded)
+                    .singleLineTightTail()
                 Text("Open AlarmStacks")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .singleLineTightTail()
             }
         }
         .padding(10)
@@ -176,12 +178,12 @@ private struct AlarmActivityLockRoot: View {
                 Text(context.state.stackName)
                     .font(.title3.weight(.semibold))
                     .fontDesign(.rounded)
-                    .lineLimit(1)
+                    .singleLineTightTail()
                 Text(context.state.stepTitle)
                     .font(.body)
                     .fontDesign(.rounded)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .singleLineTightTail()
             }
             Spacer(minLength: 8)
 
@@ -250,12 +252,12 @@ struct AlarmActivityWidget: Widget {
                         Text(context.state.stackName)
                             .font(.headline.weight(.semibold))
                             .fontDesign(.rounded)
-                            .lineLimit(1)
+                            .singleLineTightTail()
                         Text(context.state.stepTitle)
                             .font(.subheadline)
                             .fontDesign(.rounded)
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                            .singleLineTightTail()
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -322,4 +324,3 @@ struct AlarmStacksWidgetBundle: WidgetBundle {
         }
     }
 }
-    
