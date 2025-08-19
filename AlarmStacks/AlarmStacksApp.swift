@@ -112,6 +112,7 @@ struct AlarmStacksApp: App {
                 .alarmStopOverlay()
                 .background(ForegroundRearmCoordinator())
                 .preferredAppearance()
+                .syncThemeToAppGroup()
                 .onOpenURL { DeepLinks.handle($0) }
         }
         .modelContainer(for: [Stack.self, Step.self])

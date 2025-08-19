@@ -6,17 +6,23 @@
 //
 
 import Foundation
-#if canImport(ActivityKit)
+import SwiftUI
 import ActivityKit
-#endif
 
 @MainActor
 enum LiveActivityManager {
 
-    #if canImport(ActivityKit)
     private static var current: Activity<AlarmActivityAttributes>?
     private static var lastState: AlarmActivityAttributes.ContentState?
-    #endif
+
+    // MARK: - Theme access (robust against races)
+    /// Read the current theme, preferring standard defaults, falling back to App Group.
+    private static func currentThemePayload() -> ThemePayload {
+        let std = UserDefaults.standard.string(forKey: "themeName")
+        let grp = UserDefaults(suiteName: AppGroups.main)?.string(forKey: "themeName")
+        let name = std ?? grp ?? "Default"
+        return ThemeMap.payload(for: name)
+    }
 
     // MARK: - Next-step computation
 
@@ -44,29 +50,29 @@ enum LiveActivityManager {
         return nil
     }
 
-    // MARK: - Public API (iOS 16.2+ ActivityKit only)
+    // MARK: - Public API
 
     static func start(for stack: Stack, calendar: Calendar = .current) async {
         guard let info = nextStepInfo(for: stack, calendar: calendar) else {
             NextAlarmBridge.clear()
-            #if canImport(ActivityKit)
             if let activity = current {
                 let st = lastState ?? activity.content.state
                 await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
                 current = nil; lastState = nil
             }
-            #endif
             return
         }
 
-        // Widget bridge
+        // Widget bridge for the static widget
         NextAlarmBridge.write(.init(stackName: stack.name, stepTitle: info.title, fireDate: info.fire))
 
-        #if canImport(ActivityKit)
         let enabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
         guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
-        // Adopt a single existing activity; end extras to avoid stacking.
+        // Theme for initial content
+        let theme = currentThemePayload()
+
+        // Adopt one existing activity; end extras to avoid stacking duplicates
         if current == nil {
             let existing = Activity<AlarmActivityAttributes>.activities
             if let first = existing.first { current = first }
@@ -83,7 +89,8 @@ enum LiveActivityManager {
             ends: info.fire,
             allowSnooze: true,
             alarmID: "",
-            firedAt: nil
+            firedAt: nil,
+            theme: theme
         )
         let content = ActivityContent(state: newState, staleDate: nil)
 
@@ -91,49 +98,70 @@ enum LiveActivityManager {
             if let activity = current {
                 await activity.update(content)
             } else {
-                current = try Activity.request(attributes: AlarmActivityAttributes(),
-                                               content: content,
-                                               pushType: nil)
+                current = try Activity.request(
+                    attributes: AlarmActivityAttributes(),
+                    content: content,
+                    pushType: nil
+                )
             }
             lastState = newState
         } catch {
-            // ignored
+            // ignore
         }
-        #endif
     }
 
-    /// Mark the activity as fired *now* (sets `firedAt`), so UI shows the ring time and never counts up.
+    /// Mark the activity as fired *now* (sets `firedAt`) and keep the theme in sync.
     static func markFiredNow() async {
-        #if canImport(ActivityKit)
         guard let activity = current else { return }
         var st = lastState ?? activity.content.state
         if st.firedAt == nil { st.firedAt = Date() }
+
+        // Refresh theme in case it changed moments before ring
+        st.theme = currentThemePayload()
+
         let content = ActivityContent(state: st, staleDate: nil)
         await activity.update(content)
         lastState = st
-        #endif
     }
 
     /// End the Live Activity if its scheduled time has passed (used when app returns to foreground).
     static func endIfExpired() async {
-        #if canImport(ActivityKit)
         guard let activity = current else { return }
         let st = activity.content.state
         if st.ends <= Date() {
             await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
             current = nil; lastState = nil
         }
-        #endif
     }
 
     static func end() async {
         NextAlarmBridge.clear()
-        #if canImport(ActivityKit)
         if let activity = current {
             let st = lastState ?? activity.content.state
             await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
             current = nil; lastState = nil
         }
-        #endif
+    }
+
+    /// Call this when theme changes (and at app foreground) to recolour running activities.
+    static func resyncThemeForActiveActivities() async {
+        let theme = currentThemePayload()
+
+        for activity in Activity<AlarmActivityAttributes>.activities {
+            var st = activity.content.state
+            if st.theme != theme {
+                st.theme = theme
+                await activity.update(ActivityContent(state: st, staleDate: nil))
+            }
+        }
+
+        // Keep our cached state aligned if we’re tracking a current one
+        if let activity = current {
+            var st = lastState ?? activity.content.state
+            if st.theme != theme {
+                st.theme = theme
+                lastState = st
+            }
+        }
     }
 }

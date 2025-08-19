@@ -17,6 +17,7 @@ private struct ShareItem: Identifiable {
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme)  private var systemScheme
+    @Environment(\.scenePhase)   private var scenePhase
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
 
     @State private var showingAddStack = false
@@ -115,9 +116,14 @@ struct ContentView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .themedSurface() // requires ThemeSurface.swift
+            .themedSurface() // colours the list itself
+
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
+
+            // NOTE: removed toolbarBackground material to avoid covering the large title.
+            // The themed background now shows cleanly behind the title area.
+
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showingSettings = true } label: {
@@ -143,6 +149,9 @@ struct ContentView: View {
                 StepEditorView(step: step)
             }
         }
+        // Apply theme background at the root so it shows under the large title & safe areas.
+        .background(ThemeSurfaceBackground())
+
         .sheet(isPresented: $showingAddStack) {
             AddStackSheet { newStack in
                 modelContext.insert(newStack)
@@ -165,6 +174,14 @@ struct ContentView: View {
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
         .task { await store.load() }
+
+        // Ensure the theme is mirrored + live-activities recolour
+        .syncThemeToAppGroup()
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                Task { await LiveActivityManager.resyncThemeForActiveActivities() }
+            }
+        }
     }
 
     // MARK: - Actions
@@ -216,7 +233,7 @@ struct ContentView: View {
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) }
+                defer { busyStacks.remove(stack.id) }    // ✅ fixed typo
                 await AlarmScheduler.shared.cancelAll(for: stack)
             }
             modelContext.delete(stack)
@@ -403,6 +420,7 @@ private struct StepChip: View {
 
 private struct StackDetailView: View {
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.colorScheme)  private var systemScheme
     @State private var calendar = Calendar.current
     @State private var showingAddSheet = false
 
@@ -410,6 +428,12 @@ private struct StackDetailView: View {
     @State private var isBusy = false
 
     @Bindable var stack: Stack
+
+    @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
+    @AppStorage("themeName")      private var themeName: String = "Default"
+    private var appearanceID: String {
+        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
+    }
 
     var body: some View {
         List {
@@ -465,6 +489,7 @@ private struct StackDetailView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             AddStepSheet(stack: stack)
+                .id(appearanceID)           // ensure rebuild on appearance changes
                 .preferredAppearance()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
@@ -483,7 +508,8 @@ private struct StepRow: View {
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
-    private func detailText(for step: Step) -> String {
+    private func detailText(for: Step) -> String {
+        let step = `for`
         switch step.kind {
         case .fixedTime:
             var time = "Fixed"
@@ -495,11 +521,8 @@ private struct StepRow: View {
             return "Timer"
         case .relativeToPrev:
             if let s = step.offsetSeconds {
-                if s >= 0 {
-                    return "After previous • +\(format(seconds: s))"
-                } else {
-                    return "Before previous • −\(format(seconds: -s))"
-                }
+                if s >= 0 { return "After previous • +\(format(seconds: s))" }
+                else { return "Before previous • −\(format(seconds: -s))" }
             }
             return "After previous"
         }
@@ -513,13 +536,9 @@ private struct StepRow: View {
     private func daysText(for step: Step) -> String {
         let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
         let chosen: [Int]
-        if let arr = step.weekdays, !arr.isEmpty {
-            chosen = arr
-        } else if let one = step.weekday {
-            chosen = [one]
-        } else {
-            return ""
-        }
+        if let arr = step.weekdays, !arr.isEmpty { chosen = arr }
+        else if let one = step.weekday { chosen = [one] }
+        else { return "" }
         let set = Set(chosen)
         if set.count == 7 { return "Every day" }
         if set == Set([2,3,4,5,6]) { return "Weekdays" }
@@ -605,8 +624,10 @@ private struct AddStackSheet: View {
 
                         switch firstStepKind {
                         case .fixedTime:
+                            // Wheel style => user can spin time and tap Create once.
                             DatePicker("Time", selection: $firstStepTime, displayedComponents: .hourAndMinute)
-                                .datePickerStyle(.compact)
+                                .datePickerStyle(.wheel)
+                                .labelsHidden()
 
                         case .timer:
                             durationEditors
@@ -675,6 +696,7 @@ private struct AddStackSheet: View {
                         onCreate(s)
                         dismiss()
                     }
+                    // Only block when adding a non-fixed step with zero duration.
                     .disabled(addFirstStep && (firstStepKind != .fixedTime && totalSeconds == 0))
                 }
             }

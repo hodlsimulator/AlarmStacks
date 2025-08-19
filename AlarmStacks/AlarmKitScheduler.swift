@@ -112,7 +112,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
-            let attrs  = makeAttributes(alert: alert)
+            let attrs  = makeAttributes(alert: alert)                  // themed (uses app accent)
             let sound  = resolveSound(forStepName: step.soundName)
 
             let id = UUID()
@@ -189,9 +189,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
         let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
         let alert = makeAlert(title: title, allowSnooze: true)
-        let attrs = makeAttributes(alert: alert)
-
-        // Carry over original sound if present; otherwise default.
+        let attrs = makeAttributes(alert: alert)                       // themed
         let carriedName = defaults.string(forKey: soundKey(for: baseAlarmID))
         let sound = resolveSound(forStepName: carriedName)
 
@@ -301,9 +299,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
             let title: LocalizedStringResource = LocalizedStringResource("Test Alarm")
             let alert = makeAlert(title: title, allowSnooze: false)
-            let attrs = makeAttributes(alert: alert)
-
-            // Use explicit step sound if provided in future, else app default, else system default.
+            let attrs = makeAttributes(alert: alert)                   // themed
             let sound = resolveSound(forStepName: nil)
 
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
@@ -344,9 +340,11 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
 }
 
 private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<EmptyMetadata> {
-    AlarmAttributes(
-        presentation: AlarmPresentation(alert: alert),
-        tintColor: Color(red: 0.04, green: 0.52, blue: 1.00) // #0A84FF
+    let presentation = AlarmPresentation(alert: alert)
+    return AlarmAttributes<EmptyMetadata>(
+        presentation: presentation,
+        // Use the current app accent so the AlarmKit banner / Island matches your theme
+        tintColor: ThemeTintResolver.currentAccent()
     )
 }
 

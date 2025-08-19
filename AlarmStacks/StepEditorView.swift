@@ -73,6 +73,7 @@ struct StepEditorView: View {
 
     private var fixedTimeSection: some View {
         Section("Fixed time") {
+            // Wheel style allows immediate Done tap (no extra tap to dismiss a popover).
             DatePicker(
                 "Time",
                 selection: Binding<Date>(
@@ -81,7 +82,8 @@ struct StepEditorView: View {
                 ),
                 displayedComponents: .hourAndMinute
             )
-            .datePickerStyle(.compact)
+            .datePickerStyle(.wheel)
+            .labelsHidden()
         }
     }
 

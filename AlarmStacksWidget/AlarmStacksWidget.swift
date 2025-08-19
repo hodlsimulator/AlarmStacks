@@ -10,6 +10,9 @@ import Foundation
 #if canImport(ActivityKit)
 import ActivityKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Shared bridge model
 struct NextAlarmEntry: TimelineEntry {
@@ -65,11 +68,12 @@ private struct Card<Content: View>: View {
 }
 
 private struct ContainerBG: ViewModifier {
+    let color: Color
     func body(content: Content) -> some View {
         if #available(iOSApplicationExtension 17.0, *) {
-            content.containerBackground(.fill.tertiary, for: .widget)
+            content.containerBackground(color, for: .widget)
         } else {
-            content
+            content.background(color)
         }
     }
 }
@@ -79,6 +83,7 @@ private struct ContainerBG: ViewModifier {
 struct NextAlarmWidgetView: View {
     var entry: NextAlarmProvider.Entry
     @Environment(\.widgetFamily) private var family
+    @Environment(\.colorScheme)  private var scheme
 
     private var timerFont: Font {
         switch family {
@@ -88,6 +93,16 @@ struct NextAlarmWidgetView: View {
         default: return .title3.weight(.semibold)
         }
     }
+
+    // Read current theme from App Group (fallback path for static widget)
+    private var theme: ThemePayload {
+        let name = UserDefaults(suiteName: AppGroups.main)?
+            .string(forKey: "themeName") ?? "Default"
+        return ThemeMap.payload(for: name)
+    }
+
+    private var accent: Color { theme.accent.color }
+    private var bg: Color { scheme == .dark ? theme.bgDark.color : theme.bgLight.color }
 
     var body: some View {
         Card {
@@ -126,7 +141,8 @@ struct NextAlarmWidgetView: View {
             }
         }
         .padding(10)
-        .modifier(ContainerBG())
+        .modifier(ContainerBG(color: bg))
+        .tint(accent)
     }
 }
 
@@ -141,56 +157,93 @@ struct NextAlarmWidget: Widget {
     }
 }
 
-// MARK: - Live Activity (bigger, right-aligned digits; no count-up; shows fired time)
+// MARK: - Live Activity
+
+#if canImport(ActivityKit)
+@available(iOSApplicationExtension 16.1, *)
+private struct AlarmActivityLockRoot: View {
+    let context: ActivityViewContext<AlarmActivityAttributes>
+    @Environment(\.colorScheme) private var scheme
+
+    private var accent: Color { context.state.theme.accent.color }
+    private var bg: Color {
+        (scheme == .dark ? context.state.theme.bgDark.color : context.state.theme.bgLight.color)
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(context.state.stackName)
+                    .font(.title3.weight(.semibold))
+                    .fontDesign(.rounded)
+                    .lineLimit(1)
+                Text(context.state.stepTitle)
+                    .font(.body)
+                    .fontDesign(.rounded)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+
+            if let fired = context.state.firedAt {
+                Text(fired, style: .time)
+                    .monospaced()
+                    .font(.title.weight(.bold))
+                    .multilineTextAlignment(.trailing)
+            } else if context.state.ends > Date() {
+                Text(context.state.ends, style: .timer)
+                    .monospacedDigit()
+                    .font(.title.weight(.bold))
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.trailing)
+            } else {
+                Text(context.state.ends, style: .time)
+                    .monospaced()
+                    .font(.title.weight(.bold))
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .tint(accent)
+        .activityBackgroundTint(bg)                    // Allowed on Lock Screen view
+        .activitySystemActionForegroundColor(.primary)
+        .widgetURL(URL(string: "alarmstacks://activity/open"))
+    }
+}
+#endif
 
 @available(iOSApplicationExtension 16.1, *)
 struct AlarmActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(context.state.stackName)
-                        .font(.title3.weight(.semibold))
-                        .fontDesign(.rounded)
-                        .lineLimit(1)
-                    Text(context.state.stepTitle)
-                        .font(.body)
-                        .fontDesign(.rounded)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-
-                // Show big countdown until ring; after ring, show the fired time.
-                if let fired = context.state.firedAt {
-                    Text(fired, style: .time)
-                        .monospaced()
-                        .font(.title.weight(.bold))
-                        .multilineTextAlignment(.trailing)
-                } else if context.state.ends > Date() {
-                    Text(context.state.ends, style: .timer)
-                        .monospacedDigit()
-                        .font(.title.weight(.bold))
-                        .minimumScaleFactor(0.5)
-                        .lineLimit(1)
-                        .multilineTextAlignment(.trailing)
-                } else {
-                    // Ring passed but firedAt not yet set (fallback): show the ring time.
-                    Text(context.state.ends, style: .time)
-                        .monospaced()
-                        .font(.title.weight(.bold))
-                        .multilineTextAlignment(.trailing)
-                }
-            }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 14)
-            .activityBackgroundTint(.secondary.opacity(0.15))
-            .activitySystemActionForegroundColor(.primary)
-            .widgetURL(URL(string: "alarmstacks://activity/open"))
+            #if canImport(ActivityKit)
+            AlarmActivityLockRoot(context: context)
+            #else
+            EmptyView()
+            #endif
         } dynamicIsland: { context in
-            DynamicIsland {
+            #if canImport(ActivityKit)
+            let accent = context.state.theme.accent.color
+
+            // Dynamic background that adapts to light/dark (island doesn’t support activityBackgroundTint)
+            #if canImport(UIKit)
+            let bg = Color(UIColor { trait in
+                let isDark = (trait.userInterfaceStyle == .dark)
+                return isDark
+                ? UIColor(context.state.theme.bgDark.color)
+                : UIColor(context.state.theme.bgLight.color)
+            })
+            #else
+            let bg = context.state.theme.bgLight.color
+            #endif
+
+            return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    Image(systemName: "alarm.fill").imageScale(.large)
+                    Image(systemName: "alarm.fill")
+                        .imageScale(.large)
+                        .foregroundStyle(accent)
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -216,6 +269,7 @@ struct AlarmActivityWidget: Widget {
                             }
                         }
                     }
+                    .tint(accent)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
@@ -238,7 +292,7 @@ struct AlarmActivityWidget: Widget {
                     }
                 }
             } compactLeading: {
-                Image(systemName: "alarm.fill")
+                Image(systemName: "alarm.fill").foregroundStyle(accent)
             } compactTrailing: {
                 if let fired = context.state.firedAt {
                     Text(fired, style: .time).monospaced()
@@ -248,8 +302,13 @@ struct AlarmActivityWidget: Widget {
                     Text(context.state.ends, style: .time).monospaced()
                 }
             } minimal: {
-                Image(systemName: "alarm.fill")
+                Image(systemName: "alarm.fill").foregroundStyle(accent)
             }
+            .keylineTint(accent)                          // Allowed on DynamicIsland
+            // No .activityBackgroundTint here (not supported on DynamicIsland)
+            #else
+            DynamicIsland {}
+            #endif
         }
     }
 }
@@ -263,3 +322,4 @@ struct AlarmStacksWidgetBundle: WidgetBundle {
         }
     }
 }
+    
