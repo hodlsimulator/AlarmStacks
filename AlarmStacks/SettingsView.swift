@@ -48,7 +48,7 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                // Sound choice & test ring (UI only; uses system sound by default)
+                // Sound info (system default only; custom tones removed)
                 SoundSettingsSection()
 
                 // Debug toggles
@@ -69,6 +69,12 @@ struct SettingsView: View {
                 // Diagnostics
                 Section("Diagnostics") {
                     NavigationLink("Diagnostics Log") { DiagnosticsLogView() }
+                }
+
+                if !store.isPlus {
+                    Section {
+                        Button("Restore Purchases") { Task { await store.restore() } }
+                    }
                 }
             }
             .navigationTitle("Settings")

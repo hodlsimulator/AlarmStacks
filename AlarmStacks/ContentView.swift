@@ -20,17 +20,34 @@ struct ContentView: View {
 
     @State private var showingAddStack = false
     @State private var showingSettings = false
+    @State private var showingPaywall = false
+
+    @StateObject private var store = Store.shared
 
     // Prevent overlapping schedule/cancel on the same stack from different UI entry points
     @State private var busyStacks: Set<UUID> = []
+
+    private let freeStackLimit = 2
 
     var body: some View {
         NavigationStack {
             List {
                 if stacks.isEmpty {
                     EmptyState(
-                        addSamples: { addSampleStacks() },
-                        createNew: { showingAddStack = true }
+                        addSamples: {
+                            if !store.isPlus && stacks.count >= freeStackLimit {
+                                showingPaywall = true
+                            } else {
+                                addSampleStacksCapped()
+                            }
+                        },
+                        createNew: {
+                            if !store.isPlus && stacks.count >= freeStackLimit {
+                                showingPaywall = true
+                            } else {
+                                showingAddStack = true
+                            }
+                        }
                     )
                     .listRowBackground(Color.clear)
                 } else {
@@ -67,6 +84,18 @@ struct ContentView: View {
                                 .tint(stack.isArmed ? .orange : .green)
                             }
                     }
+
+                    if !store.isPlus {
+                        Section {
+                            HStack {
+                                Label("Free limit: 2 stacks", systemImage: "star")
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Get Plus") { showingPaywall = true }
+                                    .buttonStyle(.borderedProminent)
+                            }
+                        }
+                    }
                 }
             }
             .listStyle(.insetGrouped)
@@ -78,7 +107,13 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showingAddStack = true } label: {
+                    Button {
+                        if !store.isPlus && stacks.count >= freeStackLimit {
+                            showingPaywall = true
+                        } else {
+                            showingAddStack = true
+                        }
+                    } label: {
                         Label("Add Stack", systemImage: "plus")
                     }
                 }
@@ -102,6 +137,11 @@ struct ContentView: View {
             SettingsView()
                 .presentationDetents([PresentationDetent.medium, PresentationDetent.large])
         }
+        .sheet(isPresented: $showingPaywall) {
+            PaywallView()
+                .presentationDetents([.medium, .large])
+        }
+        .task { await store.load() }
     }
 
     // MARK: - Actions
@@ -163,11 +203,17 @@ struct ContentView: View {
         }
     }
 
-    private func addSampleStacks() {
+    private func addSampleStacksCapped() {
+        // Don’t exceed the free limit unless Plus is active.
+        var capacity = store.isPlus ? Int.max : (freeStackLimit - stacks.count)
+        guard capacity > 0 else { return }
+
         let s1 = sampleMorning()
-        let s2 = samplePomodoro()
-        modelContext.insert(s1)
-        modelContext.insert(s2)
+        modelContext.insert(s1); capacity -= 1
+        if capacity > 0 {
+            let s2 = samplePomodoro()
+            modelContext.insert(s2); capacity -= 1
+        }
         try? modelContext.save()
     }
 
@@ -212,6 +258,7 @@ struct ContentView: View {
 
 private struct StackRow: View {
     @Bindable var stack: Stack
+    @Environment(\.calendar) private var calendar
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -225,6 +272,12 @@ private struct StackRow: View {
                 Spacer()
                 Text("\(stack.sortedSteps.count) step\(stack.sortedSteps.count == 1 ? "" : "s")")
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let next = nextStart(for: stack) {
+                Text("Next: \(formatted(next))")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
 
@@ -242,6 +295,29 @@ private struct StackRow: View {
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private func nextStart(for stack: Stack) -> Date? {
+        // UI-only preview of the first enabled step’s next time (no scheduling).
+        let base = Date()
+        for step in stack.sortedSteps where step.isEnabled {
+            switch step.kind {
+            case .fixedTime:
+                if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
+                else { return nil }
+            case .timer, .relativeToPrev:
+                if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
+                else { return nil }
+            }
+        }
+        return nil
+    }
+
+    private func formatted(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        f.dateStyle = .medium
+        return f.string(from: date)
     }
 }
 
@@ -393,7 +469,7 @@ private struct StepRow: View {
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
         }
     }
-    private func detailText(for: Step) -> String {
+    private func detailText(for step: Step) -> String {
         switch step.kind {
         case .fixedTime:
             var time = "Fixed"
@@ -439,7 +515,7 @@ private struct StepRow: View {
     }
 }
 
-// MARK: - Add Stack / Step
+// MARK: - Add Stack / Step (unchanged logic in underlying models/scheduler)
 
 private struct AddStackSheet: View {
     @Environment(\.dismiss) private var dismiss

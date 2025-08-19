@@ -17,11 +17,18 @@ private struct ThemeOption: Identifiable, Hashable {
 }
 
 private let themeOptions: [ThemeOption] = [
+    // Free
     ThemeOption(id: "Default",  name: "Default",  tint: Color(red: 0.04, green: 0.52, blue: 1.00), requiresPlus: false), // iOS blue
-    ThemeOption(id: "Sunrise",  name: "Sunrise",  tint: Color(red: 0.98, green: 0.58, blue: 0.10), requiresPlus: true),  // orange
-    ThemeOption(id: "Mint",     name: "Mint",     tint: Color(red: 0.22, green: 0.77, blue: 0.58), requiresPlus: true),
+    ThemeOption(id: "Forest",   name: "Forest",   tint: Color(red: 0.16, green: 0.62, blue: 0.39), requiresPlus: false),
+    ThemeOption(id: "Coral",    name: "Coral",    tint: Color(red: 0.98, green: 0.45, blue: 0.35), requiresPlus: false),
+
+    // Plus
+    ThemeOption(id: "Indigo",   name: "Indigo",   tint: Color(red: 0.35, green: 0.37, blue: 0.80), requiresPlus: true),
     ThemeOption(id: "Grape",    name: "Grape",    tint: Color(red: 0.56, green: 0.27, blue: 0.68), requiresPlus: true),
-    ThemeOption(id: "Indigo",   name: "Indigo",   tint: Color(red: 0.35, green: 0.37, blue: 0.80), requiresPlus: true)
+    ThemeOption(id: "Mint",     name: "Mint",     tint: Color(red: 0.22, green: 0.77, blue: 0.58), requiresPlus: true),
+    ThemeOption(id: "Flamingo", name: "Flamingo", tint: Color(red: 1.00, green: 0.35, blue: 0.62), requiresPlus: true),
+    ThemeOption(id: "Slate",    name: "Slate",    tint: Color(red: 0.36, green: 0.42, blue: 0.49), requiresPlus: true),
+    ThemeOption(id: "Midnight", name: "Midnight", tint: Color(red: 0.10, green: 0.14, blue: 0.28), requiresPlus: true)
 ]
 
 // MARK: - Theme picker

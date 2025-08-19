@@ -24,7 +24,6 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
             DiagLog.log("UN willPresent id=\(id)")
         }
 
-        // Freeze Live Activity at the fired moment for UN-delivered alerts too.
         if notification.request.content.categoryIdentifier == NotificationCategoryID.alarm {
             Task { await LiveActivityManager.markFiredNow() }
             return []
@@ -94,11 +93,16 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
 
     init() {
-        // Register categories & set delegate as early as possible.
+        // Activate local StoreKit testing on device (DEBUG builds only).
+        #if DEBUG
+        StoreKitLocalTesting.activateIfPossible()
+        #endif
+
+        // Register categories & set delegate early.
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
 
-        // Request AlarmKit/notifications auth ASAP.
+        // Request alarm/notification auth early.
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
     }
 
@@ -108,7 +112,6 @@ struct AlarmStacksApp: App {
                 .alarmStopOverlay()
                 .background(ForegroundRearmCoordinator())
                 .preferredAppearance()
-                .appTint() // ← apply selected theme tint
                 .onOpenURL { DeepLinks.handle($0) }
         }
         .modelContainer(for: [Stack.self, Step.self])

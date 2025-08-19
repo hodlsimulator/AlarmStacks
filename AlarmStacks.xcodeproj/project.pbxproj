@@ -10,6 +10,8 @@
 		E12550C52E501624009BE32A /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E12550C42E501624009BE32A /* WidgetKit.framework */; };
 		E12550C72E501624009BE32A /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E12550C62E501624009BE32A /* SwiftUI.framework */; };
 		E12550D22E501626009BE32A /* AlarmStacksWidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		E150E0FF2E53F598004CF5D2 /* StoreKit.storekit in Resources */ = {isa = PBXBuildFile; fileRef = E150E0FE2E53F598004CF5D2 /* StoreKit.storekit */; };
+		E150E1052E5403F9004CF5D2 /* StoreKit.storekit in Resources */ = {isa = PBXBuildFile; fileRef = E150E0FE2E53F598004CF5D2 /* StoreKit.storekit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +59,7 @@
 		E12550C22E501624009BE32A /* AlarmStacksWidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AlarmStacksWidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		E12550C42E501624009BE32A /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
 		E12550C62E501624009BE32A /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		E150E0FE2E53F598004CF5D2 /* StoreKit.storekit */ = {isa = PBXFileReference; lastKnownFileType = text; path = StoreKit.storekit; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -64,6 +67,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				Untitled.swift,
 			);
 			target = E125507D2E50108B009BE32A /* AlarmStacks */;
 		};
@@ -159,6 +163,7 @@
 		E12550752E50108B009BE32A = {
 			isa = PBXGroup;
 			children = (
+				E150E0FE2E53F598004CF5D2 /* StoreKit.storekit */,
 				E12550802E50108B009BE32A /* AlarmStacks */,
 				E12550902E50109B009BE32A /* AlarmStacksTests */,
 				E125509A2E50109B009BE32A /* AlarmStacksUITests */,
@@ -336,6 +341,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E150E0FF2E53F598004CF5D2 /* StoreKit.storekit in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -357,6 +363,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E150E1052E5403F9004CF5D2 /* StoreKit.storekit in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
