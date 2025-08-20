@@ -11,9 +11,11 @@ import Foundation
 import SwiftData
 import SwiftUI
 import AlarmKit
-import AppIntents   
 import ActivityKit
 import os.log
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 final class AlarmKitScheduler: AlarmScheduling {
@@ -22,9 +24,9 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let manager  = AlarmManager.shared
     private let defaults = UserDefaults.standard
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
+    private let groupDefaults = UserDefaults(suiteName: AppGroups.main)
 
     // MARK: Tunables
-    // Longer runway so the system presents the full AK overlay (avoids “single buzz”).
     private static let minLeadSecondsFirst  = 60
     private static let minLeadSecondsNormal = 60
     private static let protectedWindowSecs  = 12
@@ -43,13 +45,81 @@ final class AlarmKitScheduler: AlarmScheduling {
     private func expectedKey(for id: UUID) -> String { "ak.expected.\(id.uuidString)" }
     private func snoozeMapKey(for base: UUID) -> String { "ak.snooze.map.\(base.uuidString)" }
     private func soundKey(for id: UUID) -> String { "ak.soundName.\(id.uuidString)" }
+    private func accentHexKey(for id: UUID) -> String { "ak.accentHex.\(id.uuidString)" }
+
+    // MARK: - Colour helpers
+
+    /// Convert a hex string to SwiftUI.Color by first constructing a fully-labelled UIColor.
+    private func colorFromHex(_ hex: String) -> SwiftUI.Color {
+        #if canImport(UIKit)
+        let ui: UIColor = {
+            var s = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            if s.hasPrefix("#") { s.removeFirst() }
+            var v: UInt64 = 0
+            guard Scanner(string: s).scanHexInt64(&v) else {
+                return UIColor(red: 0.23, green: 0.48, blue: 1.00, alpha: 1.0)
+            }
+            switch s.count {
+            case 6:
+                let r = CGFloat((v >> 16) & 0xFF) / 255.0
+                let g = CGFloat((v >>  8) & 0xFF) / 255.0
+                let b = CGFloat( v        & 0xFF) / 255.0
+                return UIColor(red: r, green: g, blue: b, alpha: 1.0)
+            case 8:
+                let r = CGFloat((v >> 24) & 0xFF) / 255.0
+                let g = CGFloat((v >> 16) & 0xFF) / 255.0
+                let b = CGFloat((v >>  8) & 0xFF) / 255.0
+                let a = CGFloat( v        & 0xFF) / 255.0
+                return UIColor(red: r, green: g, blue: b, alpha: a)
+            default:
+                return UIColor(red: 0.23, green: 0.48, blue: 1.00, alpha: 1.0)
+            }
+        }()
+        return SwiftUI.Color(uiColor: ui)
+        #else
+        // Non-UIKit (unlikely on iOS), keep labels explicit anyway.
+        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if s.hasPrefix("#") { s.removeFirst() }
+        var v: UInt64 = 0
+        guard Scanner(string: s).scanHexInt64(&v) else {
+            return SwiftUI.Color(red: 0.23, green: 0.48, blue: 1.00, opacity: 1.0)
+        }
+        switch s.count {
+        case 6:
+            let r = Double((v >> 16) & 0xFF) / 255.0
+            let g = Double((v >>  8) & 0xFF) / 255.0
+            let b = Double( v        & 0xFF) / 255.0
+            return SwiftUI.Color(red: r, green: g, blue: b, opacity: 1.0)
+        case 8:
+            let r = Double((v >> 24) & 0xFF) / 255.0
+            let g = Double((v >> 16) & 0xFF) / 255.0
+            let b = Double((v >>  8) & 0xFF) / 255.0
+            let a = Double( v        & 0xFF) / 255.0
+            return SwiftUI.Color(red: r, green: g, blue: b, opacity: a)
+        default:
+            return SwiftUI.Color(red: 0.23, green: 0.48, blue: 1.00, opacity: 1.0)
+        }
+        #endif
+    }
+
+    #if canImport(UIKit)
+    private func hex(from color: SwiftUI.Color) -> String? {
+        let ui = UIColor(color)
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        // NOTE: labels are required for green/blue/alpha in Swift 6.
+        guard ui.getRed(&r, green: &g, blue: &b, alpha: &a) else { return nil }
+        let R = Int(round(r * 255))
+        let G = Int(round(g * 255))
+        let B = Int(round(b * 255))
+        return String(format: "#%02X%02X%02X", R, G, B) // alpha intentionally ignored
+    }
+    #endif
 
     // MARK: - Permissions
 
     func requestAuthorizationIfNeeded() async throws {
         switch manager.authorizationState {
-        case .authorized:
-            return
+        case .authorized: return
         case .denied:
             throw NSError(domain: "AlarmStacks", code: 1001,
                           userInfo: [NSLocalizedDescriptionKey: "Alarm permission denied"])
@@ -94,47 +164,63 @@ final class AlarmKitScheduler: AlarmScheduling {
             DiagLog.log("AK decision ctx: firstRun=\(firstRun) (no enabled steps)")
         }
 
+        // Resolve the active accent ONCE for this scheduling pass.
+        let tintNow = ThemeTintResolver.currentAccent()
+        #if canImport(UIKit)
+        if let hexNow = hex(from: tintNow) {
+            defaults.set(hexNow, forKey: "themeAccentHex")
+            groupDefaults?.set(hexNow, forKey: "themeAccentHex")
+        }
+        #endif
+
         for step in stack.sortedSteps where step.isEnabled {
-            let nominalDate: Date
+            let fireDate: Date
             switch step.kind {
             case .fixedTime:
-                nominalDate = try step.nextFireDate(basedOn: Date(), calendar: calendar)
-                lastFireDate = nominalDate
+                fireDate = try step.nextFireDate(basedOn: Date(), calendar: calendar)
+                lastFireDate = fireDate
             case .timer, .relativeToPrev:
-                nominalDate = try step.nextFireDate(basedOn: lastFireDate, calendar: calendar)
-                lastFireDate = nominalDate
+                fireDate = try step.nextFireDate(basedOn: lastFireDate, calendar: calendar)
+                lastFireDate = fireDate
             }
 
             let now = Date()
-            let raw = max(0, nominalDate.timeIntervalSince(now))
-            let seconds = max(minLead, Int(ceil(raw)))
-            let effectiveTarget = now.addingTimeInterval(TimeInterval(seconds))
+            let secondsRaw = max(0, fireDate.timeIntervalSince(now))
+            let seconds = max(minLead, Int(ceil(secondsRaw)))
 
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
-            let attrs  = makeAttributes(alert: alert)
+            let attrs  = makeAttributes(alert: alert, tint: tintNow)
             let sound  = resolveSound(forStepName: step.soundName)
 
             let id = UUID()
-            log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); effTarget=\(effectiveTarget as NSDate, privacy: .public) nominal=\(nominalDate as NSDate, privacy: .public)")
-            DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); effTarget=\(DiagLog.f(effectiveTarget)) nominal=\(DiagLog.f(nominalDate)) shift=\(String(format: "%.3fs", effectiveTarget.timeIntervalSince(nominalDate)))")
+            log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); target=\(fireDate as NSDate, privacy: .public)")
+            DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(DiagLog.f(fireDate))")
 
-            defaults.set(effectiveTarget.timeIntervalSince1970, forKey: expectedKey(for: id))
-            if let n = step.soundName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
-            else if let n = Self.defaultSoundFilename { defaults.set(n, forKey: soundKey(for: id)) }
+            // Persist expected time & sound for diagnostics/snooze
+            defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
+            if let n = step.soundName, !n.isEmpty {
+                defaults.set(n, forKey: soundKey(for: id))
+            } else if let n = Self.defaultSoundFilename {
+                defaults.set(n, forKey: soundKey(for: id))
+            }
             defaults.set(step.snoozeMinutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stack.name,        forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(step.title,        forKey: "ak.stepTitle.\(id.uuidString)")
 
-            // Hook system buttons to our code via AppIntents (no availability checks needed on iOS 26+)
-            let stopI   = StopAlarmIntent(alarmID: id.uuidString)
-            let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
+            // Persist the EXACT accent for this AK id (both standard + app group)
+            #if canImport(UIKit)
+            if let hx = hex(from: tintNow) {
+                defaults.set(hx, forKey: accentHexKey(for: id))
+                groupDefaults?.set(hx, forKey: accentHexKey(for: id))
+            }
+            #endif
 
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
                 duration: TimeInterval(seconds),
                 attributes: attrs,
-                stopIntent: stopI,
-                secondaryIntent: snoozeI,
+                stopIntent: nil,
+                secondaryIntent: nil,
                 sound: sound
             )
             _ = try await manager.schedule(id: id, configuration: cfg)
@@ -146,20 +232,9 @@ final class AlarmKitScheduler: AlarmScheduling {
                     stepTitle: step.title,
                     scheduledAt: now,
                     scheduledUptime: ProcessInfo.processInfo.systemUptime,
-                    targetDate: effectiveTarget,
+                    targetDate: fireDate,
                     targetUptime: ProcessInfo.processInfo.systemUptime + TimeInterval(seconds),
-                    seconds: seconds,
-                    kind: .step,
-                    baseID: nil,
-                    isFirstRun: firstRun,
-                    minLeadSeconds: minLead,
-                    allowSnooze: step.allowSnooze,
-                    soundName: step.soundName,
-                    snoozeMinutes: step.snoozeMinutes,
-                    build: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-                    source: "AlarmKitScheduler.schedule",
-                    nominalDate: nominalDate,
-                    nominalSource: "Step.nextFireDate"
+                    seconds: seconds
                 )
             )
 
@@ -190,8 +265,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     // MARK: - AlarmKit Snooze (timer-based; AK-only)
 
-    /// Schedules a precise AlarmKit snooze for `minutes` from the *Snooze tap* moment (if captured),
-    /// falling back to "now" if no tap timestamp exists. Logs set vs actual.
+    /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
     @discardableResult
     func scheduleSnooze(
         baseAlarmID: UUID,
@@ -199,6 +273,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         stepTitle: String,
         minutes: Int
     ) async -> String? {
+        // Cancel existing snooze for this base alarm, if any.
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
            let existingID = UUID(uuidString: existing) {
             try? manager.cancel(id: existingID)
@@ -207,87 +282,63 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
 
         let id = UUID()
-        let setSeconds = max(1, minutes) * 60
-
-        let now   = Date()
-        let upNow = ProcessInfo.processInfo.systemUptime
-
-        let (tapWall, _) = AKDiag.loadSnoozeTap(for: baseAlarmID) ?? (now, upNow)
-        let desiredTarget = tapWall.addingTimeInterval(TimeInterval(setSeconds))
-        var duration = desiredTarget.timeIntervalSince(now)
-        if duration < 1 { duration = 1 } // safety floor
-
-        let effTarget = now.addingTimeInterval(duration)
+        let seconds = max(60, minutes * 60)
+        let target = Date().addingTimeInterval(TimeInterval(seconds))
 
         let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
         let alert = makeAlert(title: title, allowSnooze: true)
-        let attrs = makeAttributes(alert: alert)
+
+        // Prefer the EXACT accent used by the base alarm (App Group first)
+        let carriedGroup = groupDefaults?.string(forKey: accentHexKey(for: baseAlarmID))
+        let carriedStd   = defaults.string(forKey: accentHexKey(for: baseAlarmID))
+        let tint: SwiftUI.Color
+        if let hx = carriedGroup, !hx.isEmpty {
+            tint = colorFromHex(hx)
+        } else if let hx = carriedStd, !hx.isEmpty {
+            tint = colorFromHex(hx)
+        } else {
+            tint = ThemeTintResolver.currentAccent()
+        }
+        let attrs = makeAttributes(alert: alert, tint: tint)
+
         let carriedName = defaults.string(forKey: soundKey(for: baseAlarmID))
         let sound = resolveSound(forStepName: carriedName)
 
         do {
-            // Wire Lock Screen buttons to our intents
-            let stopI   = StopAlarmIntent(alarmID: id.uuidString)
-            let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
-
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
-                duration: duration,                    // Double to avoid rounding error
+                duration: TimeInterval(seconds),
                 attributes: attrs,
-                stopIntent: stopI,
-                secondaryIntent: snoozeI,
+                stopIntent: nil,
+                secondaryIntent: nil,
                 sound: sound
             )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
-            defaults.set(effTarget.timeIntervalSince1970, forKey: expectedKey(for: id))
+            // Persist diagnostics + mapping for chained snoozes.
+            defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
             defaults.set(id.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
             defaults.set(minutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stackName, forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(stepTitle, forKey: "ak.stepTitle.\(id.uuidString)")
             if let n = carriedName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
 
-            let rec = AKDiag.Record(
-                stackName: stackName,
-                stepTitle: stepTitle,
-                scheduledAt: now,
-                scheduledUptime: upNow,
-                targetDate: effTarget,                          // effective
-                targetUptime: upNow + duration,
-                seconds: setSeconds,                            // what was set
-                kind: .snooze,
-                baseID: baseAlarmID.uuidString,
-                isFirstRun: false,
-                minLeadSeconds: nil,
-                allowSnooze: true,
-                soundName: carriedName,
-                snoozeMinutes: minutes,
-                build: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
-                source: "AlarmKitScheduler.scheduleSnooze(tapAnchored)",
-                nominalDate: desiredTarget,                     // desired (tap + N×60)
-                nominalSource: "Snooze(tap + N×60s)"
-            )
-            AKDiag.save(id: id, record: rec)
+            // Persist accent for the NEW snooze id (std + group)
+            #if canImport(UIKit)
+            if let hx = hex(from: tint) {
+                defaults.set(hx, forKey: accentHexKey(for: id))
+                groupDefaults?.set(hx, forKey: accentHexKey(for: id))
+                groupDefaults?.set(hx, forKey: "themeAccentHex")
+            }
+            #endif
 
-            AKDiag.markSnoozeChain(
-                base: baseAlarmID,
-                snooze: id,
-                minutes: minutes,
-                seconds: Int(duration.rounded()),
-                target: effTarget
-            )
-
-            DiagLog.log(
-                "AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) " +
-                "set=\(setSeconds)s dur=\(String(format: "%.3f", duration))s desired=\(DiagLog.f(desiredTarget)) effTarget=\(DiagLog.f(effTarget))"
-            )
-
+            DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; target=\(DiagLog.f(target))")
             return id.uuidString
         } catch {
             DiagLog.log("AK snooze schedule FAILED base=\(baseAlarmID.uuidString) error=\(error)")
             return nil
         }
     }
- 
+
     /// Cancels the active snooze (if any) tied to a base alarm.
     func cancelSnooze(for baseAlarmID: UUID) {
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
@@ -340,6 +391,8 @@ final class AlarmKitScheduler: AlarmScheduling {
         defaults.removeObject(forKey: "ak.stackName.\(id.uuidString)")
         defaults.removeObject(forKey: "ak.stepTitle.\(id.uuidString)")
         defaults.removeObject(forKey: soundKey(for: id))
+        defaults.removeObject(forKey: accentHexKey(for: id))
+        groupDefaults?.removeObject(forKey: accentHexKey(for: id))
     }
 
     // Decide which sound to use: always system default (loops indefinitely)
@@ -368,7 +421,8 @@ final class AlarmKitScheduler: AlarmScheduling {
 
             let title: LocalizedStringResource = LocalizedStringResource("Test Alarm")
             let alert = makeAlert(title: title, allowSnooze: false)
-            let attrs = makeAttributes(alert: alert)                   // themed
+            let tint  = ThemeTintResolver.currentAccent()
+            let attrs = makeAttributes(alert: alert, tint: tint)
             let sound = resolveSound(forStepName: nil)
 
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
@@ -381,9 +435,13 @@ final class AlarmKitScheduler: AlarmScheduling {
 
             _ = try await manager.schedule(id: id, configuration: cfg)
 
-            // Diagnostics for delta logging
             defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
-            if let def = Self.defaultSoundFilename { defaults.set(def, forKey: soundKey(for: id)) }
+            #if canImport(UIKit)
+            if let hx = hex(from: tint) {
+                defaults.set(hx, forKey: accentHexKey(for: id))
+                groupDefaults?.set(hx, forKey: accentHexKey(for: id))
+            }
+            #endif
 
             DiagLog.log("AK test schedule id=\(id.uuidString) in \(delay)s; target=\(DiagLog.f(target))")
             return id.uuidString
@@ -408,12 +466,11 @@ private func makeAlert(title: LocalizedStringResource, allowSnooze: Bool) -> Ala
     }
 }
 
-private func makeAttributes(alert: AlarmPresentation.Alert) -> AlarmAttributes<EmptyMetadata> {
+private func makeAttributes(alert: AlarmPresentation.Alert, tint: SwiftUI.Color) -> AlarmAttributes<EmptyMetadata> {
     let presentation = AlarmPresentation(alert: alert)
     return AlarmAttributes<EmptyMetadata>(
         presentation: presentation,
-        // Use the current app accent so the AlarmKit banner / Island matches your theme
-        tintColor: ThemeTintResolver.currentAccent()
+        tintColor: tint
     )
 }
 

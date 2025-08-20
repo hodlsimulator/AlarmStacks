@@ -16,7 +16,8 @@ enum LiveActivityManager {
     private static var current: Activity<AlarmActivityAttributes>?
     private static var lastState: AlarmActivityAttributes.ContentState?
 
-    // MARK: - Theme access (robust against races)
+    // MARK: - Theme access
+
     /// Read the current theme, preferring standard defaults, falling back to App Group.
     private static func currentThemePayload() -> ThemePayload {
         let std = UserDefaults.standard.string(forKey: "themeName")
@@ -25,23 +26,36 @@ enum LiveActivityManager {
         return ThemeMap.payload(for: name)
     }
 
-    /// Export the accent colour to the App Group as a hex string under key "themeAccentHex".
-    /// This avoids linking the intents target to theme code. We don't assume field names;
-    /// we scan the ThemePayload for a plausible #RRGGBB/#RRGGBBAA string.
-    private static func exportAccentToAppGroup(from theme: ThemePayload) {
-        // Try to find any hex-looking string in ThemePayload (e.g. "#RRGGBB" or "#RRGGBBAA").
-        var foundHex: String?
-        let mirror = Mirror(reflecting: theme)
-        for child in mirror.children {
-            if let s = child.value as? String,
-               s.hasPrefix("#"),
-               (s.count == 7 || s.count == 9) {
-                foundHex = s
-                break
+    /// Validate/normalise a hex string; accepts "#RRGGBB"/"RRGGBB" or with alpha (8).
+    private static func cleanHex(_ s: String) -> String? {
+        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("#") { t.removeFirst() }
+        let hexSet = CharacterSet(charactersIn: "0123456789ABCDEFabcdef")
+        guard (t.count == 6 || t.count == 8), t.unicodeScalars.allSatisfy({ hexSet.contains($0) }) else { return nil }
+        return "#\(t.uppercased())"
+    }
+
+    /// Extract an accent/tint-looking hex **only from the first level** of ThemePayload.
+    /// This avoids deep reflection into SwiftUI types (which can hang).
+    private static func firstLevelAccentHex(from theme: ThemePayload) -> String? {
+        var anyHex: String?
+        let m = Mirror(reflecting: theme)
+        for child in m.children {
+            guard let raw = child.value as? String, let hx = cleanHex(raw) else { continue }
+            if let label = child.label?.lowercased(),
+               (label.contains("accent") || label.contains("tint")) {
+                return hx
             }
+            if anyHex == nil { anyHex = hx }
         }
-        // Fallback if nothing matched.
-        let hex = foundHex ?? "#FF9500" // iOS orange-like default
+        return anyHex
+    }
+
+    /// Export the app’s accent hex to both Standard and App Group for the intents path.
+    private static func exportAccentHexFromCurrentTheme() {
+        let theme = currentThemePayload()
+        let hex = firstLevelAccentHex(from: theme) ?? "#3A7BFF" // sane default blue
+        UserDefaults.standard.set(hex, forKey: "themeAccentHex")
         UserDefaults(suiteName: AppGroups.main)?.set(hex, forKey: "themeAccentHex")
     }
 
@@ -90,9 +104,9 @@ enum LiveActivityManager {
         let enabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
         guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
-        // Theme for initial content + export accent for the intents extension.
+        // Theme for initial content + export accent hex for the App Intents flow.
         let theme = currentThemePayload()
-        exportAccentToAppGroup(from: theme)
+        exportAccentHexFromCurrentTheme()
 
         // Adopt one existing activity; end extras to avoid stacking duplicates
         if current == nil {
@@ -132,16 +146,15 @@ enum LiveActivityManager {
         }
     }
 
-    /// Mark the activity as fired *now* (sets `firedAt`) and keep the theme in sync.
+    /// Mark the activity as fired *now* and keep the theme in sync + re-export accent.
     static func markFiredNow() async {
         guard let activity = current else { return }
         var st = lastState ?? activity.content.state
         if st.firedAt == nil { st.firedAt = Date() }
 
-        // Refresh theme in case it changed moments before ring
         let theme = currentThemePayload()
         st.theme = theme
-        exportAccentToAppGroup(from: theme)
+        exportAccentHexFromCurrentTheme()
 
         let content = ActivityContent(state: st, staleDate: nil)
         await activity.update(content)
@@ -179,7 +192,7 @@ enum LiveActivityManager {
             }
         }
 
-        // Keep our cached state aligned if we’re tracking a current one
+        // Keep our cached state aligned if we’re tracking one
         if let activity = current {
             var st = lastState ?? activity.content.state
             if st.theme != theme {
@@ -188,7 +201,7 @@ enum LiveActivityManager {
             }
         }
 
-        // Refresh the accent export for the intents extension.
-        exportAccentToAppGroup(from: theme)
+        // Refresh the accent export for App Intents.
+        exportAccentHexFromCurrentTheme()
     }
 }
