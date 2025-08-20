@@ -199,6 +199,8 @@ struct AddStackSheet: View {
 struct AddStepSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var router: ModalRouter
+    @StateObject private var store = Store.shared
 
     let stack: Stack
 
@@ -263,10 +265,28 @@ struct AddStepSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Add") {
-                        addStep()
+                        // UI-level guard: if cap hit, dismiss this sheet and show Paywall on top.
+                        if !store.isPlus && stack.steps.count >= FreeTier.stepsPerStackLimit {
+                            dismiss()
+                            Task { @MainActor in
+                                // brief delay so the add sheet closes before we present Paywall
+                                try? await Task.sleep(nanoseconds: 150_000_000)
+                                router.showPaywall(trigger: .steps)
+                            }
+                        } else {
+                            addStep()
+                        }
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || invalidDuration)
                 }
+            }
+        }
+        // If user got here via a stale entry point, redirect immediately.
+        .task { @MainActor in
+            if !store.isPlus && stack.steps.count >= FreeTier.stepsPerStackLimit {
+                dismiss()
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                router.showPaywall(trigger: .steps)
             }
         }
     }
@@ -318,6 +338,17 @@ struct AddStepSheet: View {
     }
 
     private func addStep() {
+        // Model-level guard (belt-and-braces)
+        if !store.isPlus && stack.steps.count >= FreeTier.stepsPerStackLimit {
+            // If somehow reached here, dismiss first then show Paywall
+            dismiss()
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                router.showPaywall(trigger: .steps)
+            }
+            return
+        }
+
         let order = (stack.sortedSteps.last?.order ?? -1) + 1
         let def = Settings.shared
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)

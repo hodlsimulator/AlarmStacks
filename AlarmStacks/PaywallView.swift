@@ -11,31 +11,40 @@ import Combine
 
 struct PaywallView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var router: ModalRouter
     @StateObject private var store = Store.shared
     @State private var purchasingID: String?
+
+    // Spacing controls:
+    private let productsTopNudge: CGFloat = 16    // how far to push the cards down
+    private let copyExtraTop: CGFloat     = 8     // extra distance for the copy vs products
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 28) {              // ← more global spacing
+                VStack(spacing: 18) {
+                    // Compact header so products stay visible
                     header
-                        .padding(.top, 8)
-
-                    planCarousel                       // ← cards first; fully visible
                         .padding(.top, 6)
-                        .padding(.bottom, 10)
+
+                    // Products FIRST — and nudged down a bit
+                    planCarousel
+                        .padding(.top, productsTopNudge)
+
+                    // Contextual copy — same nudge as products + a little extra
+                    contextualNotice
+                        .padding(.top, productsTopNudge + copyExtraTop)
 
                     featureBlurb
-                        .padding(.top, 4)
 
                     smallPrint
 
                     restoreRow
                         .padding(.top, 2)
                 }
-                .padding(.vertical, 18)
+                .padding(.vertical, 14)
             }
-            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 24) } // more bottom air
+            .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 16) }
             .navigationTitle("Get Plus")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -52,24 +61,49 @@ struct PaywallView: View {
     // MARK: - Sections
 
     private var header: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 8) {
             ZStack {
                 Circle()
                     .fill(LinearGradient(colors: [Color.yellow.opacity(0.9), Color.orange.opacity(0.9)],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 64, height: 64)
+                    .frame(width: 56, height: 56)
                 Image(systemName: "star.fill")
-                    .font(.title)
+                    .font(.title2)
                     .foregroundStyle(.black.opacity(0.85))
             }
             Text("AlarmStacks Plus")
-                .font(.title2.weight(.semibold))
+                .font(.headline)
         }
+    }
+
+    /// Contextual copy based on what triggered the paywall.
+    private var contextualNotice: some View {
+        let trigger = router.paywallTrigger
+        return Group {
+            switch trigger {
+            case .stacks:
+                NoticeBlock(
+                    title: "Unlock unlimited stacks",
+                    subtitle: "Free plan: up to **2 stacks** (3 steps each)."
+                )
+            case .steps:
+                NoticeBlock(
+                    title: "Unlock unlimited steps",
+                    subtitle: "Free plan: up to **3 steps per stack** (2 stacks total)."
+                )
+            case .unknown:
+                NoticeBlock(
+                    title: "Unlock everything in Plus",
+                    subtitle: "Build bigger routines and more stacks."
+                )
+            }
+        }
+        .padding(.horizontal, 20)
     }
 
     private var planCarousel: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 18) {                 // ← wider gap between cards
+            HStack(spacing: 16) {
                 ForEach(sortedProducts, id: \.id) { product in
                     PlanCard(
                         product: product,
@@ -84,45 +118,40 @@ struct PaywallView: View {
                             await store.purchase(product)
                         }
                     }
-                    .frame(width: 236, height: 164) // slightly compact height
+                    .frame(width: 236, height: 164)
                 }
             }
-            .padding(.horizontal, 24)             // ← more side padding
-            .padding(.vertical, 6)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 4)
         }
         .scrollClipDisabled()
     }
 
     private var featureBlurb: some View {
-        VStack(spacing: 14) {                     // ← looser spacing in blurb
-            Text("Unlock more theme colours and future premium features.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 24)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Label("Unlimited stacks (free up to 2)", systemImage: "square.stack.3d.up.fill")
-                Label("Extra themes & accents", systemImage: "paintpalette.fill")
-                Label("Future perks & early features", systemImage: "sparkles")
-            }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Unlimited stacks", systemImage: "square.stack.3d.up.fill")
+            Label("Unlimited steps per stack", systemImage: "list.number")
+            Label("Extra themes & accents", systemImage: "paintpalette.fill")
+            Label("Future perks & early features", systemImage: "sparkles")
         }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.top, 2)
     }
 
     private var smallPrint: some View {
-        Text("Subscriptions renew automatically. You can cancel any time in Settings.")
+        Text("Choose a subscription or lifetime unlock. Manage or cancel in Settings.")
             .font(.footnote)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
-            .padding(.horizontal, 28)             // ← more margins around small text
+            .padding(.horizontal, 24)
     }
 
     private var restoreRow: some View {
         Button {
-            Task { try? await AppStore.sync() }
+            Task { await store.restore() }
         } label: {
             Text("Restore Purchases")
                 .font(.callout.weight(.semibold))
@@ -139,7 +168,7 @@ struct PaywallView: View {
         let id = p.id.lowercased()
         if id.contains(".monthly") { return 0 }
         if id.contains(".yearly") || id.contains(".annual") { return 1 }
-        if id.contains(".lifetime") { return 2 }   // lifetime last
+        if id.contains(".lifetime") { return 2 }
         return 99
     }
 
@@ -176,6 +205,36 @@ struct PaywallView: View {
     }
 }
 
+// MARK: - Compact notice block that adapts to space
+
+private struct NoticeBlock: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text(.init(subtitle)) // allows **bold** segments
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            // Compact variant if space is tight
+            HStack(spacing: 8) {
+                Image(systemName: "info.circle.fill")
+                Text("\(title) — \(subtitle.replacingOccurrences(of: "**", with: ""))")
+                    .lineLimit(2)
+                    .font(.footnote)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
 // MARK: - Card
 
 private struct PlanCard: View {
@@ -193,7 +252,7 @@ private struct PlanCard: View {
                     .fill(LinearGradient(colors: style.gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
                     .shadow(radius: 8, y: 6)
 
-                VStack(alignment: .leading, spacing: 12) {     // ← more inner spacing
+                VStack(alignment: .leading, spacing: 12) {
                     if let badge {
                         Text(badge.uppercased())
                             .font(.caption2.weight(.bold))
@@ -235,7 +294,7 @@ private struct PlanCard: View {
                     .padding(.horizontal, 12)
                     .background(.ultraThinMaterial, in: Capsule())
                 }
-                .padding(18)                                   // ← a bit more padding inside card
+                .padding(18)
             }
         }
         .buttonStyle(.plain)

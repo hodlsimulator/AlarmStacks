@@ -11,34 +11,24 @@ import SwiftData
 import UIKit
 #endif
 
-// Wrapper so we can use `.sheet(item:)` later if you add export again
 private struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
 }
 
-// MARK: - Detail (moved to top so it's always in scope)
-
 private struct StackDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme)  private var systemScheme
+    @EnvironmentObject private var router: ModalRouter
     @State private var calendar = Calendar.current
-    @State private var showingAddSheet = false
-
-    // Local busy flag to avoid overlapping cancel/reschedule from detail screen
     @State private var isBusy = false
-
     @Bindable var stack: Stack
-
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")      private var themeName: String = "Default"
-    private var appearanceID: String {
-        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
-    }
+    private var appearanceID: String { "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)" }
 
     var body: some View {
         List {
-            // Editable stack name
             Section("Stack") {
                 TextField("Name", text: $stack.name)
                     .textInputAutocapitalization(.words)
@@ -47,7 +37,6 @@ private struct StackDetailView: View {
                     .onSubmit { try? modelContext.save() }
                     .onChange(of: stack.name) { _, _ in try? modelContext.save() }
             }
-
             Section {
                 Toggle(isOn: Binding(get: { stack.isArmed }, set: { newVal in
                     guard !isBusy else { return }
@@ -66,7 +55,6 @@ private struct StackDetailView: View {
                     }
                 })) { Text("Armed").singleLineTightTail() }
             }
-
             Section("Steps") {
                 ForEach(stack.sortedSteps) { step in
                     NavigationLink(value: step) { StepRow(step: step) }
@@ -75,8 +63,6 @@ private struct StackDetailView: View {
                     let snapshot = stack.sortedSteps
                     for i in idx { modelContext.delete(snapshot[i]) }
                     try? modelContext.save()
-
-                    // Auto-reschedule after deletion (guard against overlap)
                     if stack.isArmed, !isBusy {
                         isBusy = true
                         Task { @MainActor in
@@ -95,16 +81,12 @@ private struct StackDetailView: View {
         .navigationTitle(stack.name)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showingAddSheet = true } label: {
+                Button {
+                    router.presentAddStep(for: stack) // step gate handled in router
+                } label: {
                     Label("Add Step", systemImage: "plus")
                 }
             }
-        }
-        .sheet(isPresented: $showingAddSheet) {
-            AddStepSheet(stack: stack)
-                .id(appearanceID)
-                .preferredAppearanceSheet()
-                .presentationDetents(Set([PresentationDetent.medium, PresentationDetent.large]))
         }
     }
 }
@@ -114,13 +96,8 @@ private struct StepRow: View {
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
-                Text(step.title)
-                    .font(.headline)
-                    .singleLineTightTail()
-                Text(detailText(for: step))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .singleLineTightTail(minScale: 0.9)
+                Text(step.title).font(.headline).singleLineTightTail()
+                Text(detailText(for: step)).font(.subheadline).foregroundStyle(.secondary).singleLineTightTail(minScale: 0.9)
             }
             Spacer()
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
@@ -139,8 +116,8 @@ private struct StepRow: View {
             return "Timer"
         case .relativeToPrev:
             if let s = step.offsetSeconds {
-                if s >= 0 { return "After previous • +\(format(seconds: s))" }
-                else { return "Before previous • −\(format(seconds: -s))" }
+                return s >= 0 ? "After previous • +\(format(seconds: s))"
+                              : "Before previous • −\(format(seconds: -s))"
             }
             return "After previous"
         }
@@ -175,22 +152,16 @@ struct ContentView: View {
     @EnvironmentObject private var router: ModalRouter
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
 
-    // Prevent overlapping schedule/cancel on the same stack from different UI entry points
     @State private var busyStacks: Set<UUID> = []
     @StateObject private var store = Store.shared
-
     @Namespace private var sheetNS
 
     private let freeStackLimit = 2
 
-    // Forcing rebuilds when appearance or theme changes
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")      private var themeName: String = "Default"
-    private var appearanceID: String {
-        "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)"
-    }
+    private var appearanceID: String { "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)" }
 
-    // Bulk state used for the single toggle row
     private enum BulkState { case none, some, all }
     private var bulkState: BulkState {
         let total = stacks.count
@@ -208,14 +179,14 @@ struct ContentView: View {
                     EmptyState(
                         addSamples: {
                             if !store.isPlus && stacks.count >= freeStackLimit {
-                                router.showPaywall()
+                                router.showPaywall(trigger: .stacks)
                             } else {
                                 addSampleStacksCapped()
                             }
                         },
                         createNew: {
                             if !store.isPlus && stacks.count >= freeStackLimit {
-                                router.showPaywall()
+                                router.showPaywall(trigger: .stacks)
                             } else {
                                 router.showAddStack()
                             }
@@ -223,14 +194,11 @@ struct ContentView: View {
                     )
                     .listRowBackground(Color.clear)
                 } else {
-                    // Global control: single toggle with clear, large hit area
                     Section {
                         Toggle(
                             isOn: Binding(
                                 get: { bulkState == .all && !stacks.isEmpty },
-                                set: { on in
-                                    if on { armAll() } else { disarmAll() }
-                                }
+                                set: { on in if on { armAll() } else { disarmAll() } }
                             )
                         ) {
                             HStack(spacing: 8) {
@@ -239,10 +207,7 @@ struct ContentView: View {
                                     .layoutPriority(1)
                                     .singleLineTightTail()
                                 if bulkState == .some {
-                                    Text("(Mixed)")
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .singleLineTightTail()
+                                    Text("(Mixed)").font(.footnote).foregroundStyle(.secondary).singleLineTightTail()
                                 }
                             }
                         }
@@ -265,9 +230,7 @@ struct ContentView: View {
                         }
                         .swipeActions(edge: .leading, allowsFullSwipe: false) {
                             Button {
-                                withGate(for: stack) {
-                                    await toggleArm(for: stack)
-                                }
+                                withGate(for: stack) { await toggleArm(for: stack) }
                             } label: {
                                 Label(stack.isArmed ? "Disarm" : "Arm",
                                       systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
@@ -283,7 +246,7 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                     .singleLineTightTail()
                                 Spacer()
-                                Button("Get Plus") { router.showPaywall() }
+                                Button("Get Plus") { router.showPaywall(trigger: .stacks) }
                                     .buttonStyle(.borderedProminent)
                             }
                         }
@@ -295,10 +258,8 @@ struct ContentView: View {
             .themedSurface()
             .scrollDismissesKeyboard(.interactively)
             .dismissKeyboardOnTapAnywhere()
-
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
-
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { router.showSettings() } label: {
@@ -308,7 +269,7 @@ struct ContentView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         if !store.isPlus && stacks.count >= freeStackLimit {
-                            router.showPaywall()
+                            router.showPaywall(trigger: .stacks)
                         } else {
                             router.showAddStack()
                         }
@@ -326,9 +287,7 @@ struct ContentView: View {
             }
         }
         .background(ThemeSurfaceBackground())
-
         .task { await store.load() }
-
         .syncThemeToAppGroup()
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {

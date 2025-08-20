@@ -92,6 +92,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
     @StateObject private var router = ModalRouter.shared
+    @StateObject private var store = Store.shared
 
     init() {
         #if DEBUG
@@ -110,7 +111,7 @@ struct AlarmStacksApp: App {
                     .background(ForegroundRearmCoordinator())
                     .preferredAppearanceHost()   // host switches Light/Dark via environment
 
-                // NEW: tint the backdrop so the sheet’s blur looks correct in Light/Dark,
+                // Tint the backdrop so the sheet’s blur looks correct in Light/Dark,
                 // without making the sheet opaque.
                 SheetBackdropWash()
 
@@ -119,6 +120,11 @@ struct AlarmStacksApp: App {
             .environmentObject(router)
             .syncThemeToAppGroup()
             .onOpenURL { DeepLinks.handle($0) }
+            .task {
+                // SK2: products, updates stream, entitlements — at launch
+                await store.configureAtLaunch()
+                store.debugFetchProducts() // one clear log line on TestFlight devices
+            }
         }
         .modelContainer(for: [Stack.self, Step.self])
     }

@@ -84,6 +84,22 @@ struct GlobalSheetsHost: View {
                     .presentationDetents(Set([.medium, .large]))
                     .presentationDragIndicator(.visible)
 
+                case .addStep:
+                    if let stack = router.addStepTarget {
+                        AddStepSheet(stack: stack)
+                            .id(appearanceID)
+                            .preferredAppearanceSheet()
+                            .presentationDetents(Set([.medium, .large]))
+                            .presentationDragIndicator(.visible)
+                    } else {
+                        // Defensive: avoid crashing if no target is present.
+                        EmptyView()
+                            .id(appearanceID)
+                            .preferredAppearanceSheet()
+                            .presentationDetents(Set([.medium, .large]))
+                            .presentationDragIndicator(.visible)
+                    }
+
                 case .paywall:
                     PaywallView()
                         .id(appearanceID)
