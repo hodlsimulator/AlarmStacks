@@ -15,6 +15,14 @@ struct SettingsView: View {
 
     @State private var showingPaywall = false
 
+    // MARK: - App Version
+
+    private var versionString: String {
+        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0"
+        let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"
+        return "\(v) (\(b))"
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -80,6 +88,17 @@ struct SettingsView: View {
                     NavigationLink("Diagnostics Log") { DiagnosticsLogView() }
                 }
 
+                // About / Version
+                Section("About") {
+                    HStack {
+                        Text("Version")
+                        Spacer()
+                        Text(versionString)
+                            .foregroundStyle(.secondary)
+                            .singleLineTightTail()
+                    }
+                }
+
                 if !store.isPlus {
                     Section { Button("Restore Purchases") { Task { await store.restore() } } }
                 }
@@ -109,4 +128,3 @@ struct SettingsView: View {
         }
     }
 }
-    

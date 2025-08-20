@@ -213,7 +213,8 @@ final class AlarmKitScheduler: AlarmScheduling {
             let attrs  = makeAttributes(alert: alert, tint: tintNow)
             let sound  = resolveSound(forStepName: step.soundName)
 
-            // Attach AppIntent actions so Snooze goes through our unified path.
+            // Attach AppIntent actions so Snooze goes through our unified path,
+            // and only include Snooze when the step allows it.
             let stopI   = StopAlarmIntent(alarmID: id.uuidString)
             let snoozeI = step.allowSnooze ? SnoozeAlarmIntent(alarmID: id.uuidString) : nil
 
@@ -308,10 +309,8 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
     }
 
-    // MARK: - AlarmKit Snooze (timer-based; AK-only, unified path)
+    // MARK: - AlarmKit Snooze (timer-based; AK-only, unified + middle-step chain shift)
 
-    /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
-    /// If the base belongs to the first step of its stack, push the chain by the same delta.
     @discardableResult
     func scheduleSnooze(
         baseAlarmID: UUID,
@@ -329,7 +328,7 @@ final class AlarmKitScheduler: AlarmScheduling {
 
         let id = UUID()
         let seconds = max(Self.minLeadSecondsNormal, minutes * 60)
-        let target = Date().addingTimeInterval(TimeInterval(seconds))
+        let newBase = Date().addingTimeInterval(TimeInterval(seconds))
 
         let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
         let alert = makeAlert(title: title, allowSnooze: true)
@@ -337,24 +336,19 @@ final class AlarmKitScheduler: AlarmScheduling {
         // Prefer the EXACT accent used by the base alarm (App Group first)
         let carriedGroup = groupDefaults?.string(forKey: accentHexKey(for: baseAlarmID))
         let carriedStd   = defaults.string(forKey: accentHexKey(for: baseAlarmID))
-        let tint: SwiftUI.Color
-        if let hx = carriedGroup, !hx.isEmpty {
-            tint = colorFromHex(hx)
-        } else if let hx = carriedStd, !hx.isEmpty {
-            tint = colorFromHex(hx)
-        } else {
-            tint = ThemeTintResolver.currentAccent()
-        }
-        let attrs = makeAttributes(alert: alert, tint: tint)
+        let tint: SwiftUI.Color = {
+            if let hx = carriedGroup, !hx.isEmpty { return colorFromHex(hx) }
+            if let hx = carriedStd,   !hx.isEmpty { return colorFromHex(hx) }
+            return ThemeTintResolver.currentAccent()
+        }()
 
+        let attrs = makeAttributes(alert: alert, tint: tint)
         let carriedName = defaults.string(forKey: soundKey(for: baseAlarmID))
         let sound = resolveSound(forStepName: carriedName)
 
-        // Attach intents to the snooze alarm as well.
-        let stopI   = StopAlarmIntent(alarmID: id.uuidString)
-        let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
-
         do {
+            let stopI   = StopAlarmIntent(alarmID: id.uuidString)
+            let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
                 duration: TimeInterval(seconds),
                 attributes: attrs,
@@ -365,26 +359,42 @@ final class AlarmKitScheduler: AlarmScheduling {
             _ = try await manager.schedule(id: id, configuration: cfg)
 
             // Persist diagnostics + mapping for chained snoozes.
-            defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id)) // store eff target for snooze
+            defaults.set(newBase.timeIntervalSince1970, forKey: expectedKey(for: id)) // effective target for snooze
             defaults.set(id.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
             defaults.set(minutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stackName, forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(stepTitle, forKey: "ak.stepTitle.\(id.uuidString)")
             if let n = carriedName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
-
-            // Persist accent for the NEW snooze id (std + group)
             #if canImport(UIKit)
-            if let hx = hex(from: tint) {
-                defaults.set(hx, forKey: accentHexKey(for: id))
-                groupDefaults?.set(hx, forKey: accentHexKey(for: id))
-                groupDefaults?.set(hx, forKey: "themeAccentHex")
+            if let carriedHex = carriedGroup ?? carriedStd {
+                defaults.set(carriedHex, forKey: accentHexKey(for: id))
+                groupDefaults?.set(carriedHex, forKey: accentHexKey(for: id))
+                groupDefaults?.set(carriedHex, forKey: "themeAccentHex")
             }
             #endif
 
-            DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; effTarget=\(DiagLog.f(target))")
+            // Ensure the NEW snooze alarm has stack/offset mapping for future chained snoozes.
+            if let stackID = defaults.string(forKey: stackIDKey(for: baseAlarmID)) {
+                let firstEpoch = defaults.double(forKey: firstTargetKey(forStackID: stackID))
+                let firstDate  = firstEpoch > 0 ? Date(timeIntervalSince1970: firstEpoch) : nil
+                let baseOffset = (defaults.object(forKey: offsetFromFirstKey(for: baseAlarmID)) as? Double) ?? 0
+                let oldNominal = (defaults.double(forKey: expectedKey(for: baseAlarmID)) > 0)
+                    ? Date(timeIntervalSince1970: defaults.double(forKey: expectedKey(for: baseAlarmID)))
+                    : firstDate?.addingTimeInterval(baseOffset)
+                if firstDate != nil, let oldNom = oldNominal {
+                    let delta = newBase.timeIntervalSince(oldNom)
+                    let newOffset = baseOffset + delta
+                    defaults.set(stackID,  forKey: stackIDKey(for: id))
+                    defaults.set(newOffset,forKey: offsetFromFirstKey(for: id))
+                    defaults.set("timer",  forKey: kindKey(for: id))
+                    defaults.set(true,     forKey: allowSnoozeKey(for: id))
+                }
+            }
 
-            // If this was the FIRST step of its stack, push the chain.
-            await shiftChainIfFirstWasSnoozed(baseAlarmID: baseAlarmID, newBase: target)
+            DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; effTarget=\(DiagLog.f(newBase))")
+
+            // Generalised chain shift: push subsequent steps by delta when any step is snoozed.
+            await shiftChainAfterSnooze(baseAlarmID: baseAlarmID, newBase: newBase)
 
             return id.uuidString
         } catch {
@@ -392,7 +402,7 @@ final class AlarmKitScheduler: AlarmScheduling {
             return nil
         }
     }
-
+    
     /// Cancels the active snooze (if any) tied to a base alarm.
     func cancelSnooze(for baseAlarmID: UUID) {
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
@@ -423,23 +433,33 @@ final class AlarmKitScheduler: AlarmScheduling {
         return (secs, eff, enforced)
     }
 
-    /// If the snoozed base alarm was the first step of its stack, push remaining steps by the same delta.
-    private func shiftChainIfFirstWasSnoozed(baseAlarmID: UUID, newBase: Date) async {
-        let baseOffset = defaults.object(forKey: offsetFromFirstKey(for: baseAlarmID)) as? Double ?? Double.nan
+    // MARK: - Chain shift after snooze of ANY step (first or middle)
+
+    private func shiftChainAfterSnooze(baseAlarmID: UUID, newBase: Date) async {
         guard let stackID = defaults.string(forKey: stackIDKey(for: baseAlarmID)) else {
             DiagLog.log("[CHAIN] shift? base=\(baseAlarmID.uuidString) (no stackID found)")
             return
         }
 
         let firstEpoch = defaults.double(forKey: firstTargetKey(forStackID: stackID))
-        let oldFirst = firstEpoch > 0 ? Date(timeIntervalSince1970: firstEpoch) : nil
-        let delta = oldFirst.map { newBase.timeIntervalSince($0) } ?? 0
-        DiagLog.log(String(format: "[CHAIN] shift? stack=%@ base=%@ first=%@ Δ=%+.3fs offsetBase=%@",
-                           stackID, baseAlarmID.uuidString, oldFirst.map(DiagLog.f) ?? "nil", delta,
-                           baseOffset.isNaN ? "nil" : String(format: "%.1fs", baseOffset)))
+        guard firstEpoch > 0 else {
+            DiagLog.log("[CHAIN] shift? stack=\(stackID) (no first target recorded)")
+            return
+        }
+        let firstDate = Date(timeIntervalSince1970: firstEpoch)
 
-        // Only if snoozed alarm had offset==0 (first step)
-        guard baseOffset.isFinite, baseOffset == 0 else { return }
+        let baseOffset = (defaults.object(forKey: offsetFromFirstKey(for: baseAlarmID)) as? Double) ?? 0
+        let isFirst = abs(baseOffset) < 0.5
+
+        // Previous nominal time of the base step.
+        let baseNominalTS = defaults.double(forKey: expectedKey(for: baseAlarmID))
+        let oldNominal = baseNominalTS > 0 ? Date(timeIntervalSince1970: baseNominalTS)
+                                           : firstDate.addingTimeInterval(baseOffset)
+
+        let delta = newBase.timeIntervalSince(oldNominal)
+
+        DiagLog.log(String(format: "[CHAIN] shift stack=%@ base=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
+                           stackID, baseAlarmID.uuidString, DiagLog.f(newBase), delta, baseOffset, isFirst ? "y" : "n"))
 
         var ids = defaults.stringArray(forKey: storageKey(forStackID: stackID)) ?? []
         if ids.isEmpty {
@@ -447,32 +467,36 @@ final class AlarmKitScheduler: AlarmScheduling {
             return
         }
 
-        // Update first target to the snooze's effective target
-        defaults.set(newBase.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stackID))
-        DiagLog.log("[CHAIN] shift stack=\(stackID) base=\(baseAlarmID.uuidString) newBase=\(DiagLog.f(newBase))")
+        if isFirst {
+            // If first step snoozed: the base of the chain moves.
+            defaults.set(newBase.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stackID))
+        } else {
+            // Middle-step snooze: keep first target; but update the base step’s offset mapping
+            defaults.set(baseOffset + delta, forKey: offsetFromFirstKey(for: baseAlarmID))
+        }
 
         for oldStr in ids {
             guard let oldID = UUID(uuidString: oldStr), oldID != baseAlarmID else { continue }
 
             let kind = defaults.string(forKey: kindKey(for: oldID)) ?? "timer"
-            if kind == "fixed" {
-                DiagLog.log("[CHAIN] skip fixed id=\(oldID.uuidString)")
-                continue
-            }
+            if kind == "fixed" { DiagLog.log("[CHAIN] skip fixed id=\(oldID.uuidString)"); continue }
 
-            guard let offset = defaults.object(forKey: offsetFromFirstKey(for: oldID)) as? Double else {
+            guard let off = defaults.object(forKey: offsetFromFirstKey(for: oldID)) as? Double else {
                 DiagLog.log("[CHAIN] skip id=\(oldID.uuidString) (no offset)")
                 continue
             }
 
-            // Skip if we no longer track a nominal expected time (already fired/stopped).
+            // Only push steps AFTER the snoozed one when snooze is for a middle step.
+            if !isFirst && off <= baseOffset { continue }
+
+            // Skip if already fired/cleared.
             let expectedTS = defaults.double(forKey: expectedKey(for: oldID))
             if expectedTS <= 0 {
-                DiagLog.log("[CHAIN] skip id=\(oldID.uuidString) (no expected nominal; likely fired/stopped)")
+                DiagLog.log("[CHAIN] skip id=\(oldID.uuidString) (no expected; likely fired)")
                 continue
             }
 
-            // Read carried metadata BEFORE cleanup/cancel.
+            // Carried metadata (read BEFORE cleanup)
             let stackName   = defaults.string(forKey: "ak.stackName.\(oldID.uuidString)") ?? "Alarm"
             let stepTitle   = defaults.string(forKey: "ak.stepTitle.\(oldID.uuidString)") ?? "Step"
             let allowSnooze = (defaults.object(forKey: allowSnoozeKey(for: oldID)) as? Bool) ?? true
@@ -486,9 +510,17 @@ final class AlarmKitScheduler: AlarmScheduling {
                 return ThemeTintResolver.currentAccent()
             }()
 
-            // Compute new target
-            let newNominal = newBase.addingTimeInterval(offset)
-            let (secs, effTarget, enforced) = enforceMinLeadSeconds(for: newNominal, minLead: Self.minLeadSecondsNormal)
+            // New nominal and new offset
+            let newOffset  = isFirst ? off : (off + delta)
+            let newNominal = isFirst ? newBase.addingTimeInterval(off)
+                                     : firstDate.addingTimeInterval(newOffset)
+
+            // Enforce ≥60s lead from NOW
+            let now = Date()
+            let raw = max(0, newNominal.timeIntervalSince(now))
+            let secs = max(Self.minLeadSecondsNormal, Int(ceil(raw)))
+            let effTarget = now.addingTimeInterval(TimeInterval(secs))
+            let enforcedStr = secs > Int(ceil(raw)) ? "\(secs)s" : "-"
 
             // Cancel old + cleanup
             try? manager.cancel(id: oldID)
@@ -514,14 +546,13 @@ final class AlarmKitScheduler: AlarmScheduling {
                 )
                 _ = try await manager.schedule(id: newID, configuration: cfg)
 
-                // Persist new id’s metadata
+                // Persist metadata for new id
                 defaults.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID)) // store nominal for steps
                 defaults.set(stackName,  forKey: "ak.stackName.\(newID.uuidString)")
                 defaults.set(stepTitle,  forKey: "ak.stepTitle.\(newID.uuidString)")
                 defaults.set(allowSnooze, forKey: allowSnoozeKey(for: newID))
                 defaults.set(snoozeMins, forKey: "ak.snoozeMinutes.\(newID.uuidString)")
                 if let n = carriedName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: newID)) }
-
                 #if canImport(UIKit)
                 if let hx = carriedGroupHex ?? carriedStdHex {
                     defaults.set(hx, forKey: accentHexKey(for: newID))
@@ -529,16 +560,15 @@ final class AlarmKitScheduler: AlarmScheduling {
                 }
                 #endif
 
-                // Preserve mapping info for future shifts
-                defaults.set(stackID, forKey: stackIDKey(for: newID))
-                defaults.set(offset,  forKey: offsetFromFirstKey(for: newID))
-                defaults.set(kind,    forKey: kindKey(for: newID))
+                // Preserve mapping
+                defaults.set(stackID,  forKey: stackIDKey(for: newID))
+                defaults.set(newOffset,forKey: offsetFromFirstKey(for: newID))
+                defaults.set(kind,     forKey: kindKey(for: newID))
 
-                // Update tracked list
+                // Swap id in tracked list
                 if let idx = ids.firstIndex(of: oldStr) { ids[idx] = newID.uuidString }
                 defaults.set(ids, forKey: storageKey(forStackID: stackID))
 
-                // Diagnostics
                 AKDiag.save(
                     id: newID,
                     record: AKDiag.Record(
@@ -559,18 +589,17 @@ final class AlarmKitScheduler: AlarmScheduling {
                         build: nil,
                         source: "chainShift",
                         nominalDate: newNominal,
-                        nominalSource: "newBase+offset"
+                        nominalSource: isFirst ? "newBase+offset" : "first+offset+Δ"
                     )
                 )
 
-                let enforcedStr = enforced != nil ? "\(enforced!)s" : "-"
-                DiagLog.log("[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) offset=\(Int(offset))s newTarget=\(DiagLog.f(newNominal)) enforcedLead=\(enforcedStr) kind=\(kind)")
+                DiagLog.log("[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(String(format: "%.1fs", newOffset)) newTarget=\(DiagLog.f(newNominal)) enforcedLead=\(enforcedStr) kind=\(kind)")
             } catch {
                 DiagLog.log("[CHAIN] FAILED to reschedule prev=\(oldID.uuidString) error=\(error)")
             }
         }
     }
-
+    
     // MARK: Helpers
 
     private func nextEnabledStepFireDate(for stack: Stack, calendar: Calendar) -> Date? {
