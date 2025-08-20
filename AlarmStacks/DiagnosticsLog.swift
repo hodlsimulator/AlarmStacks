@@ -5,22 +5,72 @@
 //  Created by . . on 8/17/25.
 //
 
+import Foundation
 import SwiftUI
 import UIKit
 import UserNotifications
+
+// MARK: - App environment snapshot (active/inactive/background + lock state + scene counts)
+
+@MainActor
+enum AppEnv {
+
+    static func snapshot() -> String {
+        #if canImport(UIKit)
+        let app = UIApplication.shared
+
+        // Map app state to a readable string
+        let stateName: String = {
+            switch app.applicationState {
+            case .active:     return "active"
+            case .inactive:   return "inactive"
+            case .background: return "background"
+            @unknown default: return "unknown"
+            }
+        }()
+
+        // Foreground scene counts
+        let scenes = app.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let fa = scenes.filter { $0.activationState == .foregroundActive   }.count
+        let fi = scenes.filter { $0.activationState == .foregroundInactive }.count
+        let ba = scenes.filter { $0.activationState == .background         }.count
+        let un = scenes.filter { $0.activationState == .unattached         }.count
+
+        // Lock state: public signal is "protectedDataAvailable"
+        let locked = !app.isProtectedDataAvailable
+
+        // High-level context guess
+        let context: String = {
+            if locked { return "LockScreen" }
+            switch app.applicationState {
+            case .active:     return "InApp"
+            case .inactive:   return "SystemOverlayOrTransition"
+            case .background: return "OtherAppOrHome"
+            @unknown default: return "Unknown"
+            }
+        }()
+
+        return "state=\(stateName) locked=\(locked ? "yes" : "no") scenes{fa=\(fa) fi=\(fi) bg=\(ba) un=\(un)} context=\(context)"
+        #else
+        return "state=unknown (no UIKit)"
+        #endif
+    }
+}
 
 // MARK: - Diagnostics logging (local time + monotonic uptime)
 
 @MainActor
 enum DiagLog {
     private static let key = "diag.log.lines"
-    private static let maxLines = 800
+    private static let maxLines = 2000
 
     private static let local: DateFormatter = {
         let f = DateFormatter()
         f.calendar = Calendar(identifier: .iso8601)
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"   // local with offset, e.g. +01:00
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = .current
+        // Correct: fractional seconds use 'S', not 'f'
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"   // e.g. 2025-08-20 16:10:06.726 +01:00
         return f
     }()
 
@@ -51,15 +101,30 @@ enum DiagLog {
         let delivered = await c.deliveredNotifications()
         log("UN audit pending=\(pending.count) delivered=\(delivered.count)")
     }
+
+    /// Environment stamp with app state/lock info.
+    static func envStamp(_ reason: String) {
+        let tz = TimeZone.current.identifier
+        let lp = ProcessInfo.processInfo.isLowPowerModeEnabled ? "LP=on" : "LP=off"
+        let env = AppEnv.snapshot()
+        log("ENV \(reason) tz=\(tz) \(lp) \(env)")
+    }
 }
 
-// MARK: - AlarmKit diagnostics record (persist target wall time + target uptime per id)
+// MARK: - AlarmKit diagnostics record (persist target times + snooze tap tracking)
 
 @MainActor
 enum AKDiag {
     private static func key(_ id: UUID) -> String { "ak.record.\(id.uuidString)" }
+    private static func tapKey(_ base: UUID) -> String { "ak.snooze.tap.\(base.uuidString)" }
 
+    enum Kind: String, Codable { case step, snooze, test }
+
+    /// One record per scheduled AK alarm (step, snooze, or test).
+    /// `targetDate`/`targetUptime` are the **effective** timer target (now + `seconds`).
+    /// `nominalDate` (optional) is the calendar time we *wanted* (e.g. :00 step time).
     struct Record: Codable {
+        // Base fields
         var stackName: String
         var stepTitle: String
         var scheduledAt: Date
@@ -67,12 +132,69 @@ enum AKDiag {
         var targetDate: Date
         var targetUptime: TimeInterval
         var seconds: Int
+
+        // Extended fields
+        var kind: Kind?
+        var baseID: String?
+        var isFirstRun: Bool?
+        var minLeadSeconds: Int?
+        var allowSnooze: Bool?
+        var soundName: String?
+        var snoozeMinutes: Int?
+        var build: String?
+        var source: String?
+
+        // Nominal (desired calendar) target for steps
+        var nominalDate: Date?
+        var nominalSource: String?
     }
+
+    // Persist/restore a snooze tap moment (for measuring tap→alert)
+    private struct Tap: Codable { let wall: Date; let up: TimeInterval }
+
+    static func rememberSnoozeTap(for base: UUID,
+                                  wall: Date = Date(),
+                                  up: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        if let data = try? JSONEncoder().encode(Tap(wall: wall, up: up)) {
+            UserDefaults.standard.set(data, forKey: tapKey(base))
+        }
+        DiagLog.log("AK SNOOZE TAPPED base=\(base.uuidString)")
+    }
+
+    static func loadSnoozeTap(for base: UUID) -> (Date, TimeInterval)? {
+        guard let data = UserDefaults.standard.data(forKey: tapKey(base)),
+              let tap = try? JSONDecoder().decode(Tap.self, from: data) else { return nil }
+        return (tap.wall, tap.up)
+    }
+
+    static func clearSnoozeTap(for base: UUID) {
+        UserDefaults.standard.removeObject(forKey: tapKey(base))
+    }
+
+    // MARK: Save / Load
 
     static func save(id: UUID, record: Record) {
         if let data = try? JSONEncoder().encode(record) {
             UserDefaults.standard.set(data, forKey: key(id))
         }
+
+        // Human-readable one-liner with optional shift
+        let k = record.kind?.rawValue ?? "step"
+        let base = record.baseID ?? "-"
+        let lead = record.minLeadSeconds.map(String.init) ?? "-"
+        let snoozeMins = record.snoozeMinutes.map(String.init) ?? "-"
+        let snd = record.soundName ?? "-"
+        let fr = (record.isFirstRun ?? false) ? "1st" : "n"
+        var nominal = ""
+        if let nd = record.nominalDate {
+            let shift = record.targetDate.timeIntervalSince(nd)
+            nominal = " nominal=\(DiagLog.f(nd)) shift=\(String(format: "%.3fs", shift))"
+        }
+        DiagLog.log(
+            "AK rec kind=\(k) id=\(id.uuidString) base=\(base) stack=\(record.stackName) step=\(record.stepTitle) " +
+            "secs=\(record.seconds) minLead=\(lead) snoozeMins=\(snoozeMins) sound=\(snd) firstRun=\(fr) " +
+            "scheduledAt=\(DiagLog.f(record.scheduledAt)) effTarget=\(DiagLog.f(record.targetDate))" + nominal
+        )
     }
 
     static func load(id: UUID) -> Record? {
@@ -81,34 +203,156 @@ enum AKDiag {
     }
 
     static func remove(id: UUID) { UserDefaults.standard.removeObject(forKey: key(id)) }
+
+    // MARK: - Convenience helpers
+
+    /// Δ relative to the **effective** timer target.
+    static func deltasAtAlert(using rec: Record,
+                              nowWall: Date = Date(),
+                              nowUp: TimeInterval = ProcessInfo.processInfo.systemUptime) -> (Double, Double) {
+        let wallDelta = nowWall.timeIntervalSince(rec.targetDate)
+        let upDelta   = nowUp - rec.targetUptime
+        return (wallDelta, upDelta)
+    }
+
+    /// Δ relative to the **nominal** (calendar) target, if known.
+    static func nominalDeltaAtAlert(using rec: Record,
+                                    nowWall: Date = Date()) -> Double? {
+        guard let nd = rec.nominalDate else { return nil }
+        return nowWall.timeIntervalSince(nd)
+    }
+
+    static func markSnoozeChain(base baseID: UUID, snooze newID: UUID, minutes: Int, seconds: Int, target: Date) {
+        let upNow = ProcessInfo.processInfo.systemUptime
+        DiagLog.log(
+            "AK SNOOZE CHAIN base=\(baseID.uuidString) -> id=\(newID.uuidString) mins=\(minutes) secs=\(seconds) " +
+            "scheduledAt=\(DiagLog.f(Date())) up=\(String(format: "%.3f", upNow)) effTarget=\(DiagLog.f(target))"
+        )
+    }
+
+    static func markStopped(id: UUID) {
+        DiagLog.log("AK STOP id=\(id.uuidString)")
+    }
+
+    // CSV export
+
+    static func csvRow(for id: UUID, rec: Record, alertWall: Date? = nil, alertUp: TimeInterval? = nil) -> String {
+        let kind = rec.kind?.rawValue ?? "step"
+        let base = rec.baseID ?? ""
+        let sound = rec.soundName ?? ""
+        let allow = (rec.allowSnooze ?? false) ? "1" : "0"
+        let fr = (rec.isFirstRun ?? false) ? "1" : "0"
+        let lead = rec.minLeadSeconds.map(String.init) ?? ""
+        let snoozeMins = rec.snoozeMinutes.map(String.init) ?? ""
+        let build = rec.build ?? ""
+        let source = rec.source ?? ""
+        let nominal = rec.nominalDate.map(DiagLog.f) ?? ""
+
+        var wallEffΔ = ""
+        var upΔ = ""
+        var wallNomΔ = ""
+        if let aw = alertWall, let au = alertUp {
+            let (w, u) = deltasAtAlert(using: rec, nowWall: aw, nowUp: au)
+            wallEffΔ = String(format: "%.3f", w)
+            upΔ = String(format: "%.3f", u)
+            if let nd = rec.nominalDate {
+                wallNomΔ = String(format: "%.3f", aw.timeIntervalSince(nd))
+            }
+        }
+
+        let shift = rec.nominalDate.map { rec.targetDate.timeIntervalSince($0) }.map { String(format: "%.3f", $0) } ?? ""
+
+        return [
+            id.uuidString,
+            kind,
+            base,
+            rec.stackName,
+            rec.stepTitle,
+            DiagLog.f(rec.scheduledAt),
+            String(format: "%.3f", rec.scheduledUptime),
+            DiagLog.f(rec.targetDate),
+            String(format: "%.3f", rec.targetUptime),
+            "\(rec.seconds)",
+            lead,
+            snoozeMins,
+            sound,
+            allow,
+            fr,
+            build,
+            source,
+            nominal,
+            shift,
+            wallEffΔ,
+            wallNomΔ,
+            upΔ
+        ].joined(separator: ",")
+    }
+
+    static func exportCSV() -> String {
+        let mirror = UserDefaults.standard.dictionaryRepresentation()
+        let prefix = "ak.record."
+        let keys = mirror.keys.filter { $0.hasPrefix(prefix) }
+        var rows: [String] = []
+        rows.append([
+            "id","kind","baseID","stackName","stepTitle",
+            "scheduledAtLocal","scheduledUptime",
+            "effectiveTargetLocal","effectiveTargetUptime","seconds",
+            "minLead","snoozeMinutes","sound","allowSnooze","firstRun","build","source",
+            "nominalTargetLocal","effectiveMinusNominalShift",
+            "alertEffDelta","alertNominalDelta","alertUpDelta"
+        ].joined(separator: ","))
+
+        for k in keys.sorted() {
+            let idStr = String(k.dropFirst(prefix.count))
+            guard let id = UUID(uuidString: idStr),
+                  let rec = load(id: id) else { continue }
+            rows.append(csvRow(for: id, rec: rec))
+        }
+        return rows.joined(separator: "\n")
+    }
 }
 
 // MARK: - UI: selectable/copyable diagnostics viewer
 
 struct DiagnosticsLogView: View {
     @State private var lines: [String] = DiagLog.read()
+    @State private var csv: String = ""
     private var joined: String { lines.joined(separator: "\n\n") }
 
     var body: some View {
         ScrollView {
-            Text(joined.isEmpty ? "No entries yet." : joined)
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled) // selectable / copyable
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
-                        )
-                )
-                .padding()
-                .contextMenu {
-                    Button("Copy All") { UIPasteboard.general.string = joined }
-                    ShareLink(item: joined) { Label("Share…", systemImage: "square.and.arrow.up") }
+            VStack(spacing: 16) {
+                Text(joined.isEmpty ? "No entries yet." : joined)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                            )
+                    )
+
+                if csv.isEmpty == false {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("CSV Preview (AK Records)")
+                            .font(.system(.headline, design: .rounded))
+                        ScrollView(.horizontal) {
+                            Text(csv)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(.horizontal)
                 }
+            }
+            .padding(.top)
         }
         .navigationTitle("Diagnostics")
         .toolbar {
@@ -116,12 +360,22 @@ struct DiagnosticsLogView: View {
                 Button("Clear") {
                     DiagLog.clear()
                     lines = []
+                    csv = ""
                 }
             }
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button("Copy") { UIPasteboard.general.string = joined }
-                ShareLink(item: joined) { Text("Share") }
+                Button("Copy Log") { UIPasteboard.general.string = joined }
+                ShareLink(item: joined) { Text("Share Log") }
                 Button("Refresh") { refresh(withAudits: true) }
+                Menu("AK Export") {
+                    Button("Copy CSV") {
+                        csv = AKDiag.exportCSV()
+                        UIPasteboard.general.string = csv
+                    }
+                    Button("Refresh CSV Preview") {
+                        csv = AKDiag.exportCSV()
+                    }
+                }
             }
         }
         .onAppear { refresh(withAudits: false) }
@@ -138,3 +392,4 @@ struct DiagnosticsLogView: View {
         }
     }
 }
+    

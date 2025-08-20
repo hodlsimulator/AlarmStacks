@@ -11,6 +11,7 @@ import Foundation
 import SwiftData
 import SwiftUI
 import AlarmKit
+import AppIntents   
 import ActivityKit
 import os.log
 
@@ -69,14 +70,12 @@ final class AlarmKitScheduler: AlarmScheduling {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         try await requestAuthorizationIfNeeded()
 
-        // Don’t stomp a timer that’s about to fire.
         if let imminent = nextEnabledStepFireDate(for: stack, calendar: calendar),
            imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
             DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
             return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
-        // First-auth UI jitter
         if hasScheduledOnceAK == false {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
@@ -89,7 +88,6 @@ final class AlarmKitScheduler: AlarmScheduling {
         let firstRun = (hasScheduledOnceAK == false)
         let minLead  = firstRun ? Self.minLeadSecondsFirst : Self.minLeadSecondsNormal
 
-        // Log effective lead for the first enabled step
         if let eff = effectiveLeadSeconds(for: stack, calendar: calendar, minLead: minLead) {
             DiagLog.log("AK decision ctx: firstRun=\(firstRun) minLeadPref=0s effFirst=\(eff)s")
         } else {
@@ -97,51 +95,50 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
 
         for step in stack.sortedSteps where step.isEnabled {
-            let fireDate: Date
+            let nominalDate: Date
             switch step.kind {
             case .fixedTime:
-                fireDate = try step.nextFireDate(basedOn: Date(), calendar: calendar)
-                lastFireDate = fireDate
+                nominalDate = try step.nextFireDate(basedOn: Date(), calendar: calendar)
+                lastFireDate = nominalDate
             case .timer, .relativeToPrev:
-                fireDate = try step.nextFireDate(basedOn: lastFireDate, calendar: calendar)
-                lastFireDate = fireDate
+                nominalDate = try step.nextFireDate(basedOn: lastFireDate, calendar: calendar)
+                lastFireDate = nominalDate
             }
 
             let now = Date()
-            let secondsRaw = max(0, fireDate.timeIntervalSince(now))
-            let seconds = max(minLead, Int(ceil(secondsRaw)))
+            let raw = max(0, nominalDate.timeIntervalSince(now))
+            let seconds = max(minLead, Int(ceil(raw)))
+            let effectiveTarget = now.addingTimeInterval(TimeInterval(seconds))
 
             let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
             let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
-            let attrs  = makeAttributes(alert: alert)                  // themed (uses app accent)
+            let attrs  = makeAttributes(alert: alert)
             let sound  = resolveSound(forStepName: step.soundName)
 
             let id = UUID()
-            log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); target=\(fireDate as NSDate, privacy: .public)")
-            DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); target=\(DiagLog.f(fireDate))")
+            log.info("AK schedule id=\(id.uuidString, privacy: .public) timer in \(seconds, privacy: .public)s; stack=\(stack.name, privacy: .public); step=\(step.title, privacy: .public); effTarget=\(effectiveTarget as NSDate, privacy: .public) nominal=\(nominalDate as NSDate, privacy: .public)")
+            DiagLog.log("AK schedule id=\(id.uuidString) timer in \(seconds)s; stack=\(stack.name); step=\(step.title); effTarget=\(DiagLog.f(effectiveTarget)) nominal=\(DiagLog.f(nominalDate)) shift=\(String(format: "%.3fs", effectiveTarget.timeIntervalSince(nominalDate)))")
 
-            // Persist expected time & sound for diagnostics/snooze
-            defaults.set(fireDate.timeIntervalSince1970, forKey: expectedKey(for: id))
-            if let n = step.soundName, !n.isEmpty {
-                defaults.set(n, forKey: soundKey(for: id))
-            } else if let n = Self.defaultSoundFilename {
-                defaults.set(n, forKey: soundKey(for: id))
-            }
+            defaults.set(effectiveTarget.timeIntervalSince1970, forKey: expectedKey(for: id))
+            if let n = step.soundName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
+            else if let n = Self.defaultSoundFilename { defaults.set(n, forKey: soundKey(for: id)) }
             defaults.set(step.snoozeMinutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stack.name,        forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(step.title,        forKey: "ak.stepTitle.\(id.uuidString)")
 
-            // Single AK timer per step (no retries)
+            // Hook system buttons to our code via AppIntents (no availability checks needed on iOS 26+)
+            let stopI   = StopAlarmIntent(alarmID: id.uuidString)
+            let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
+
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
                 duration: TimeInterval(seconds),
                 attributes: attrs,
-                stopIntent: nil,
-                secondaryIntent: nil,
+                stopIntent: stopI,
+                secondaryIntent: snoozeI,
                 sound: sound
             )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
-            // Diagnostics record (wall clock + uptime)
             AKDiag.save(
                 id: id,
                 record: AKDiag.Record(
@@ -149,9 +146,20 @@ final class AlarmKitScheduler: AlarmScheduling {
                     stepTitle: step.title,
                     scheduledAt: now,
                     scheduledUptime: ProcessInfo.processInfo.systemUptime,
-                    targetDate: fireDate,
+                    targetDate: effectiveTarget,
                     targetUptime: ProcessInfo.processInfo.systemUptime + TimeInterval(seconds),
-                    seconds: seconds
+                    seconds: seconds,
+                    kind: .step,
+                    baseID: nil,
+                    isFirstRun: firstRun,
+                    minLeadSeconds: minLead,
+                    allowSnooze: step.allowSnooze,
+                    soundName: step.soundName,
+                    snoozeMinutes: step.snoozeMinutes,
+                    build: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                    source: "AlarmKitScheduler.schedule",
+                    nominalDate: nominalDate,
+                    nominalSource: "Step.nextFireDate"
                 )
             )
 
@@ -182,7 +190,8 @@ final class AlarmKitScheduler: AlarmScheduling {
 
     // MARK: - AlarmKit Snooze (timer-based; AK-only)
 
-    /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
+    /// Schedules a precise AlarmKit snooze for `minutes` from the *Snooze tap* moment (if captured),
+    /// falling back to "now" if no tap timestamp exists. Logs set vs actual.
     @discardableResult
     func scheduleSnooze(
         baseAlarmID: UUID,
@@ -190,7 +199,6 @@ final class AlarmKitScheduler: AlarmScheduling {
         stepTitle: String,
         minutes: Int
     ) async -> String? {
-        // Cancel existing snooze for this base alarm, if any.
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
            let existingID = UUID(uuidString: existing) {
             try? manager.cancel(id: existingID)
@@ -199,41 +207,87 @@ final class AlarmKitScheduler: AlarmScheduling {
         }
 
         let id = UUID()
-        let seconds = max(60, minutes * 60)
-        let target = Date().addingTimeInterval(TimeInterval(seconds))
+        let setSeconds = max(1, minutes) * 60
+
+        let now   = Date()
+        let upNow = ProcessInfo.processInfo.systemUptime
+
+        let (tapWall, _) = AKDiag.loadSnoozeTap(for: baseAlarmID) ?? (now, upNow)
+        let desiredTarget = tapWall.addingTimeInterval(TimeInterval(setSeconds))
+        var duration = desiredTarget.timeIntervalSince(now)
+        if duration < 1 { duration = 1 } // safety floor
+
+        let effTarget = now.addingTimeInterval(duration)
 
         let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
         let alert = makeAlert(title: title, allowSnooze: true)
-        let attrs = makeAttributes(alert: alert)                       // themed
+        let attrs = makeAttributes(alert: alert)
         let carriedName = defaults.string(forKey: soundKey(for: baseAlarmID))
         let sound = resolveSound(forStepName: carriedName)
 
         do {
+            // Wire Lock Screen buttons to our intents
+            let stopI   = StopAlarmIntent(alarmID: id.uuidString)
+            let snoozeI = SnoozeAlarmIntent(alarmID: id.uuidString)
+
             let cfg: AlarmManager.AlarmConfiguration<EmptyMetadata> = .timer(
-                duration: TimeInterval(seconds),
+                duration: duration,                    // Double to avoid rounding error
                 attributes: attrs,
-                stopIntent: nil,
-                secondaryIntent: nil,
+                stopIntent: stopI,
+                secondaryIntent: snoozeI,
                 sound: sound
             )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
-            // Persist diagnostics + mapping for chained snoozes.
-            defaults.set(target.timeIntervalSince1970, forKey: expectedKey(for: id))
+            defaults.set(effTarget.timeIntervalSince1970, forKey: expectedKey(for: id))
             defaults.set(id.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
             defaults.set(minutes, forKey: "ak.snoozeMinutes.\(id.uuidString)")
             defaults.set(stackName, forKey: "ak.stackName.\(id.uuidString)")
             defaults.set(stepTitle, forKey: "ak.stepTitle.\(id.uuidString)")
             if let n = carriedName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
 
-            DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) timer in \(seconds)s; target=\(DiagLog.f(target))")
+            let rec = AKDiag.Record(
+                stackName: stackName,
+                stepTitle: stepTitle,
+                scheduledAt: now,
+                scheduledUptime: upNow,
+                targetDate: effTarget,                          // effective
+                targetUptime: upNow + duration,
+                seconds: setSeconds,                            // what was set
+                kind: .snooze,
+                baseID: baseAlarmID.uuidString,
+                isFirstRun: false,
+                minLeadSeconds: nil,
+                allowSnooze: true,
+                soundName: carriedName,
+                snoozeMinutes: minutes,
+                build: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                source: "AlarmKitScheduler.scheduleSnooze(tapAnchored)",
+                nominalDate: desiredTarget,                     // desired (tap + N×60)
+                nominalSource: "Snooze(tap + N×60s)"
+            )
+            AKDiag.save(id: id, record: rec)
+
+            AKDiag.markSnoozeChain(
+                base: baseAlarmID,
+                snooze: id,
+                minutes: minutes,
+                seconds: Int(duration.rounded()),
+                target: effTarget
+            )
+
+            DiagLog.log(
+                "AK snooze schedule base=\(baseAlarmID.uuidString) id=\(id.uuidString) " +
+                "set=\(setSeconds)s dur=\(String(format: "%.3f", duration))s desired=\(DiagLog.f(desiredTarget)) effTarget=\(DiagLog.f(effTarget))"
+            )
+
             return id.uuidString
         } catch {
             DiagLog.log("AK snooze schedule FAILED base=\(baseAlarmID.uuidString) error=\(error)")
             return nil
         }
     }
-
+ 
     /// Cancels the active snooze (if any) tied to a base alarm.
     func cancelSnooze(for baseAlarmID: UUID) {
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),

@@ -25,6 +25,26 @@ enum LiveActivityManager {
         return ThemeMap.payload(for: name)
     }
 
+    /// Export the accent colour to the App Group as a hex string under key "themeAccentHex".
+    /// This avoids linking the intents target to theme code. We don't assume field names;
+    /// we scan the ThemePayload for a plausible #RRGGBB/#RRGGBBAA string.
+    private static func exportAccentToAppGroup(from theme: ThemePayload) {
+        // Try to find any hex-looking string in ThemePayload (e.g. "#RRGGBB" or "#RRGGBBAA").
+        var foundHex: String?
+        let mirror = Mirror(reflecting: theme)
+        for child in mirror.children {
+            if let s = child.value as? String,
+               s.hasPrefix("#"),
+               (s.count == 7 || s.count == 9) {
+                foundHex = s
+                break
+            }
+        }
+        // Fallback if nothing matched.
+        let hex = foundHex ?? "#FF9500" // iOS orange-like default
+        UserDefaults(suiteName: AppGroups.main)?.set(hex, forKey: "themeAccentHex")
+    }
+
     // MARK: - Next-step computation
 
     private static func nextStepInfo(for stack: Stack, calendar: Calendar) -> (title: String, fire: Date)? {
@@ -70,8 +90,9 @@ enum LiveActivityManager {
         let enabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
         guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
 
-        // Theme for initial content
+        // Theme for initial content + export accent for the intents extension.
         let theme = currentThemePayload()
+        exportAccentToAppGroup(from: theme)
 
         // Adopt one existing activity; end extras to avoid stacking duplicates
         if current == nil {
@@ -118,7 +139,9 @@ enum LiveActivityManager {
         if st.firedAt == nil { st.firedAt = Date() }
 
         // Refresh theme in case it changed moments before ring
-        st.theme = currentThemePayload()
+        let theme = currentThemePayload()
+        st.theme = theme
+        exportAccentToAppGroup(from: theme)
 
         let content = ActivityContent(state: st, staleDate: nil)
         await activity.update(content)
@@ -164,5 +187,8 @@ enum LiveActivityManager {
                 lastState = st
             }
         }
+
+        // Refresh the accent export for the intents extension.
+        exportAccentToAppGroup(from: theme)
     }
 }

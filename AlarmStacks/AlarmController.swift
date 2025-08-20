@@ -60,38 +60,84 @@ final class AlarmController: ObservableObject {
                         self.alertingAlarm = a
 
                         // --- Diagnostics ---
-                        let appStateDesc: String = {
-                            #if canImport(UIKit)
-                            let raw = UIApplication.shared.applicationState.rawValue
-                            return "UIApplicationState(rawValue: \(raw))"
-                            #else
-                            return "unknown"
-                            #endif
-                        }()
+                        let env   = AppEnv.snapshot()
+                        let now   = Date()
+                        let upNow = ProcessInfo.processInfo.systemUptime
 
                         let key = "ak.expected.\(a.id.uuidString)"
-                        let ts = UserDefaults.standard.double(forKey: key)
+                        let ts  = UserDefaults.standard.double(forKey: key)
                         if ts > 0 {
-                            let expected = Date(timeIntervalSince1970: ts)
-                            let wallDelta = Date().timeIntervalSince(expected)
+                            let expectedEff = Date(timeIntervalSince1970: ts)
 
                             if let rec = AKDiag.load(id: a.id) {
-                                let upNow = ProcessInfo.processInfo.systemUptime
-                                let upDelta = upNow - rec.targetUptime
+                                // Effective (timer) deltas
+                                let (wallEffΔ, upΔ) = AKDiag.deltasAtAlert(using: rec, nowWall: now, nowUp: upNow)
+
+                                // Nominal delta + shift (if known)
+                                var nominalPart = ""
+                                if let wallNomΔ = AKDiag.nominalDeltaAtAlert(using: rec, nowWall: now),
+                                   let nd = rec.nominalDate {
+                                    let shift = rec.targetDate.timeIntervalSince(nd)
+                                    nominalPart = String(
+                                        format: " nomΔ=%.3fs shift=%.3fs nominal=%@",
+                                        wallNomΔ, shift, DiagLog.f(nd)
+                                    )
+                                }
+
+                                // Snooze set vs actual + signed delta (positive = early, negative = late)
+                                var snoozeDetail = ""
+                                if rec.kind == .snooze, let baseStr = rec.baseID, let baseUUID = UUID(uuidString: baseStr) {
+                                    let setSeconds = Double(rec.seconds)
+
+                                    if let (tapWall, tapUp) = AKDiag.loadSnoozeTap(for: baseUUID) {
+                                        let tapWallΔ   = now.timeIntervalSince(tapWall)
+                                        let tapUpΔ     = upNow - tapUp
+                                        let tapDeltaVsSet = setSeconds - tapWallΔ   // + = early, - = late
+
+                                        let schedWallΔ = now.timeIntervalSince(rec.scheduledAt)
+                                        let schedUpΔ   = upNow - rec.scheduledUptime
+                                        let schedDeltaVsSet = setSeconds - schedWallΔ
+
+                                        snoozeDetail = String(
+                                            format: " snooze{set=%ds tap→alert=%.3fs ΔvsSet=%+.3fs up=%.3f schedule→alert=%.3fs ΔvsSet=%+.3fs up=%.3f}",
+                                            rec.seconds, tapWallΔ, tapDeltaVsSet, tapUpΔ, schedWallΔ, schedDeltaVsSet, schedUpΔ
+                                        )
+                                        AKDiag.clearSnoozeTap(for: baseUUID)
+                                    } else {
+                                        let schedWallΔ = now.timeIntervalSince(rec.scheduledAt)
+                                        let schedUpΔ   = upNow - rec.scheduledUptime
+                                        let schedDeltaVsSet = setSeconds - schedWallΔ
+
+                                        snoozeDetail = String(
+                                            format: " snooze{set=%ds schedule→alert=%.3fs ΔvsSet=%+.3fs up=%.3f}",
+                                            rec.seconds, schedWallΔ, schedDeltaVsSet, schedUpΔ
+                                        )
+                                    }
+                                }
+
                                 DiagLog.log(String(
-                                    format: "AK alerting id=%@ appState=%@ wallΔ=%.3fs upΔ=%.3fs targetLocal=%@",
-                                    a.id.uuidString, appStateDesc, wallDelta, upDelta, DiagLog.f(expected)
+                                    format: "AK alerting id=%@ env={%@} effΔ=%.3fs upΔ=%.3fs effTarget=%@%@%@",
+                                    a.id.uuidString,
+                                    env,
+                                    wallEffΔ,
+                                    upΔ,
+                                    DiagLog.f(rec.targetDate),
+                                    nominalPart,
+                                    snoozeDetail
                                 ))
+
                                 AKDiag.remove(id: a.id)
                             } else {
+                                // Fallback: we only know the effective target via expected key
+                                let wallEffΔ = now.timeIntervalSince(expectedEff)
                                 DiagLog.log(String(
-                                    format: "AK alerting id=%@ appState=%@ wallΔ=%.3fs targetLocal=%@",
-                                    a.id.uuidString, appStateDesc, wallDelta, DiagLog.f(expected)
+                                    format: "AK alerting id=%@ env={%@} effΔ=%.3fs effTarget=%@",
+                                    a.id.uuidString, env, wallEffΔ, DiagLog.f(expectedEff)
                                 ))
                             }
                             UserDefaults.standard.removeObject(forKey: key)
                         } else {
-                            DiagLog.log("AK alerting id=\(a.id.uuidString) appState=\(appStateDesc) (no expected fire time recorded)")
+                            DiagLog.log("AK alerting id=\(a.id.uuidString) env={\(env)} (no expected fire time recorded)")
                         }
                         // -----------------------------------------
 
@@ -118,17 +164,21 @@ final class AlarmController: ObservableObject {
     func stop(_ id: UUID) {
         #if canImport(AlarmKit)
         try? manager.stop(id: id)
+        AKDiag.markStopped(id: id)
         #endif
     }
 
     func snooze(_ id: UUID) {
         #if canImport(AlarmKit)
+        // Capture the tap moment (for tap→alert measurement)
+        AKDiag.rememberSnoozeTap(for: id)
+
         // Silence the current ring immediately.
         try? manager.stop(id: id)
 
         // Read the per-alarm snooze settings we persisted when scheduling.
         let ud = UserDefaults.standard
-        let minutes = max(1, ud.integer(forKey: "ak.snoozeMinutes.\(id.uuidString)"))
+        let minutes   = max(1, ud.integer(forKey: "ak.snoozeMinutes.\(id.uuidString)"))
         let stackName = ud.string(forKey: "ak.stackName.\(id.uuidString)") ?? "Alarm"
         let stepTitle = ud.string(forKey: "ak.stepTitle.\(id.uuidString)") ?? "Snoozed"
 
@@ -147,9 +197,9 @@ final class AlarmController: ObservableObject {
 
     func auditAKNow() {
         #if canImport(AlarmKit)
-        let counts = Dictionary(grouping: lastSnapshot, by: { $0.state }).mapValues { $0.count }
+        let counts  = Dictionary(grouping: lastSnapshot, by: { $0.state }).mapValues { $0.count }
         let summary = counts.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
-        DiagLog.log("AK snapshot size=\(lastSnapshot.count) states{\(summary)}")
+        DiagLog.log("AK snapshot size=\(lastSnapshot.count) states{\(summary)} env={\(AppEnv.snapshot())}")
         #endif
     }
 }
