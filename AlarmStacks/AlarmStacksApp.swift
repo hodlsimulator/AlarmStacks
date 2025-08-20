@@ -108,7 +108,12 @@ struct AlarmStacksApp: App {
                 ContentView()
                     .alarmStopOverlay()
                     .background(ForegroundRearmCoordinator())
-                    .preferredAppearanceHost()   // host switches Light/Dark live (no preferredColorScheme)
+                    .preferredAppearanceHost()   // host switches Light/Dark via environment
+
+                // NEW: tint the backdrop so the sheet’s blur looks correct in Light/Dark,
+                // without making the sheet opaque.
+                SheetBackdropWash()
+
                 GlobalSheetsHost()
             }
             .environmentObject(router)

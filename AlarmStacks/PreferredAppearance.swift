@@ -43,7 +43,7 @@ private func tintColor(for name: String) -> Color {
     }
 }
 
-// MARK: - Host modifier (environment only; never preferredColorScheme)
+// MARK: - Host modifier
 
 private struct PreferredAppearanceHost: ViewModifier {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
@@ -68,10 +68,16 @@ private struct PreferredAppearanceHost: ViewModifier {
 }
 
 #if os(iOS)
-// MARK: - UIKit override for the SHEET host (instant, no dismissals)
+// MARK: - UIKit bridge (only for forced Light/Dark; System uses remount trick)
 
-private struct SheetUIStyleOverride: UIViewControllerRepresentable {
-    var mode: AppearanceMode
+private final class _StyleBox {
+    var applied: UIUserInterfaceStyle = .unspecified
+}
+
+private struct SheetStyleBridge: UIViewControllerRepresentable {
+    var style: UIUserInterfaceStyle  // .light or .dark
+
+    func makeCoordinator() -> _StyleBox { _StyleBox() }
 
     func makeUIViewController(context: Context) -> UIViewController {
         let vc = UIViewController()
@@ -82,35 +88,29 @@ private struct SheetUIStyleOverride: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ vc: UIViewController, context: Context) {
-        let target: UIUserInterfaceStyle = {
-            switch mode {
-            case .system: return .unspecified
-            case .light:  return .light
-            case .dark:   return .dark
-            }
-        }()
-        // Apply to the sheet’s hosting controller only.
-        DispatchQueue.main.async {
-            if let parent = vc.parent {
-                parent.overrideUserInterfaceStyle = target
-                parent.navigationController?.overrideUserInterfaceStyle = target
-            }
+        guard context.coordinator.applied != style else { return }
+        context.coordinator.applied = style
+
+        guard let host = vc.parent else { return }
+        if host.overrideUserInterfaceStyle != style {
+            host.overrideUserInterfaceStyle = style
+        }
+        if let nav = host.navigationController,
+           nav.overrideUserInterfaceStyle != style {
+            nav.overrideUserInterfaceStyle = style
         }
     }
 
-    static func dismantleUIViewController(_ vc: UIViewController, coordinator: ()) {
-        vc.parent?.overrideUserInterfaceStyle = .unspecified
-        vc.parent?.navigationController?.overrideUserInterfaceStyle = .unspecified
+    static func dismantleUIViewController(_ vc: UIViewController, coordinator: _StyleBox) {
+        if let host = vc.parent {
+            host.overrideUserInterfaceStyle = .unspecified
+            host.navigationController?.overrideUserInterfaceStyle = .unspecified
+        }
     }
-}
-#else
-private struct SheetUIStyleOverride: View {
-    var mode: AppearanceMode
-    var body: some View { EmptyView() }
 }
 #endif
 
-// MARK: - Sheet modifier (drive chrome via UIKit; nudge SwiftUI env to match)
+// MARK: - SHEET modifier (apply at presenter: GlobalSheetsHost)
 
 private struct PreferredAppearanceSheet: ViewModifier {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
@@ -118,30 +118,47 @@ private struct PreferredAppearanceSheet: ViewModifier {
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        let selected = AppearanceMode(rawValue: mode) ?? .system
-
-        switch selected {
+        switch AppearanceMode(rawValue: mode) ?? .system {
         case .system:
+            // System: no explicit forcing; host remount in GlobalSheetsHost rebuilds card with current scheme.
             content
-                .background(SheetUIStyleOverride(mode: .system).frame(width: 0, height: 0))
-                .tint(tintColor(for: themeName))  // no colorScheme override in System
+                .tint(tintColor(for: themeName))
 
         case .light:
+            #if os(iOS)
             content
                 .environment(\.colorScheme, .light)
-                .background(SheetUIStyleOverride(mode: .light).frame(width: 0, height: 0))
+                .preferredColorScheme(.light)
                 .tint(tintColor(for: themeName))
+                .background(SheetStyleBridge(style: .light).frame(width: 0, height: 0))
+            #else
+            content
+                .environment(\.colorScheme, .light)
+                .preferredColorScheme(.light)
+                .tint(tintColor(for: themeName))
+            #endif
 
         case .dark:
+            #if os(iOS)
             content
                 .environment(\.colorScheme, .dark)
-                .background(SheetUIStyleOverride(mode: .dark).frame(width: 0, height: 0))
+                .preferredColorScheme(.dark)
                 .tint(tintColor(for: themeName))
+                .background(SheetStyleBridge(style: .dark).frame(width: 0, height: 0))
+            #else
+            content
+                .environment(\.colorScheme, .dark)
+                .preferredColorScheme(.dark)
+                .tint(tintColor(for: themeName))
+            #endif
         }
     }
 }
+
+// MARK: - Public helpers
 
 extension View {
     func preferredAppearanceHost() -> some View { modifier(PreferredAppearanceHost()) }
     func preferredAppearanceSheet() -> some View { modifier(PreferredAppearanceSheet()) }
 }
+    
