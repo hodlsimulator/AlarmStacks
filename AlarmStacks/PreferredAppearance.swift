@@ -24,23 +24,81 @@ enum AppearanceMode: String, CaseIterable {
     }
 }
 
-// MARK: - Theme tint
+// MARK: - Brand tint (pure Swift, no UIKit initialisers)
 
-private func tintColor(for name: String) -> Color {
+private struct RGB { let r: Double, g: Double, b: Double }
+
+private func baseRGB(for name: String) -> RGB {
     switch name {
-    case "Default":  return Color(red: 0.04, green: 0.52, blue: 1.00) // iOS blue
-    case "Forest":   return Color(red: 0.16, green: 0.62, blue: 0.39)
-    case "Coral":    return Color(red: 0.98, green: 0.45, blue: 0.35)
+    case "Default":  return RGB(r: 0.04, g: 0.52, b: 1.00) // iOS blue
+    case "Forest":   return RGB(r: 0.16, g: 0.62, b: 0.39)
+    case "Coral":    return RGB(r: 0.98, g: 0.45, b: 0.35)
 
-    case "Indigo":   return Color(red: 0.35, green: 0.37, blue: 0.80)
-    case "Grape":    return Color(red: 0.56, green: 0.27, blue: 0.68)
-    case "Mint":     return Color(red: 0.22, green: 0.77, blue: 0.58)
-    case "Flamingo": return Color(red: 1.00, green: 0.35, blue: 0.62)
-    case "Slate":    return Color(red: 0.36, green: 0.42, blue: 0.49)
-    case "Midnight": return Color(red: 0.10, green: 0.14, blue: 0.28)
+    case "Indigo":   return RGB(r: 0.35, g: 0.37, b: 0.80)
+    case "Grape":    return RGB(r: 0.56, g: 0.27, b: 0.68)
+    case "Mint":     return RGB(r: 0.22, g: 0.77, b: 0.58)
+    case "Flamingo": return RGB(r: 1.00, g: 0.35, b: 0.62)
+    case "Slate":    return RGB(r: 0.36, g: 0.42, b: 0.49)
+    case "Midnight": return RGB(r: 0.10, g: 0.14, b: 0.28)
 
-    default:         return Color(red: 0.04, green: 0.52, blue: 1.00)
+    default:         return RGB(r: 0.04, g: 0.52, b: 1.00)
     }
+}
+
+private func clamp(_ x: Double, _ a: Double, _ b: Double) -> Double { min(max(x, a), b) }
+
+private func rgbToHsv(_ c: RGB) -> (h: Double, s: Double, v: Double) {
+    let maxv = max(c.r, max(c.g, c.b))
+    let minv = min(c.r, min(c.g, c.b))
+    let delta = maxv - minv
+
+    var h: Double = 0
+    let s: Double = maxv == 0 ? 0 : (delta / maxv)
+    let v: Double = maxv
+
+    if delta != 0 {
+        if maxv == c.r {
+            h = (c.g - c.b) / delta + (c.g < c.b ? 6 : 0)
+        } else if maxv == c.g {
+            h = (c.b - c.r) / delta + 2
+        } else {
+            h = (c.r - c.g) / delta + 4
+        }
+        h /= 6
+    }
+    return (h, s, v)
+}
+
+private func hsvToRgb(h: Double, s: Double, v: Double) -> RGB {
+    if s == 0 { return RGB(r: v, g: v, b: v) }
+    let hh = (h - floor(h)) * 6
+    let i = Int(hh)
+    let f = hh - Double(i)
+    let p = v * (1 - s)
+    let q = v * (1 - s * f)
+    let t = v * (1 - s * (1 - f))
+    switch i % 6 {
+    case 0: return RGB(r: v, g: t, b: p)
+    case 1: return RGB(r: q, g: v, b: p)
+    case 2: return RGB(r: p, g: v, b: t)
+    case 3: return RGB(r: p, g: q, b: v)
+    case 4: return RGB(r: t, g: p, b: v)
+    default:return RGB(r: v, g: p, b: q)
+    }
+}
+
+/// Slightly brightens dark-mode tint so `.borderedProminent` won’t flip to white on some iOS 26 betas.
+private func elevatedForDarkMode(_ rgb: RGB, minBrightness: Double = 0.72, maxSaturation: Double = 0.92) -> RGB {
+    var (h, s, v) = rgbToHsv(rgb)
+    s = clamp(s, 0, maxSaturation)
+    v = max(v, minBrightness)
+    return hsvToRgb(h: h, s: s, v: v)
+}
+
+private func brandTint(for name: String, scheme: ColorScheme) -> Color {
+    let base = baseRGB(for: name)
+    let rgb = (scheme == .dark) ? elevatedForDarkMode(base) : base
+    return Color(red: rgb.r, green: rgb.g, blue: rgb.b)
 }
 
 // MARK: - Host modifier
@@ -48,21 +106,24 @@ private func tintColor(for name: String) -> Color {
 private struct PreferredAppearanceHost: ViewModifier {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")     private var themeName: String = "Default"
+    @Environment(\.colorScheme)  private var systemScheme
 
     @ViewBuilder
     func body(content: Content) -> some View {
         switch AppearanceMode(rawValue: mode) ?? .system {
         case .system:
             content
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: systemScheme))
+
         case .light:
             content
                 .environment(\.colorScheme, .light)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .light))
+
         case .dark:
             content
                 .environment(\.colorScheme, .dark)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .dark))
         }
     }
 }
@@ -115,27 +176,27 @@ private struct SheetStyleBridge: UIViewControllerRepresentable {
 private struct PreferredAppearanceSheet: ViewModifier {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")     private var themeName: String = "Default"
+    @Environment(\.colorScheme)  private var systemScheme
 
     @ViewBuilder
     func body(content: Content) -> some View {
         switch AppearanceMode(rawValue: mode) ?? .system {
         case .system:
-            // System: no explicit forcing; host remount in GlobalSheetsHost rebuilds card with current scheme.
             content
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: systemScheme))
 
         case .light:
             #if os(iOS)
             content
                 .environment(\.colorScheme, .light)
                 .preferredColorScheme(.light)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .light))
                 .background(SheetStyleBridge(style: .light).frame(width: 0, height: 0))
             #else
             content
                 .environment(\.colorScheme, .light)
                 .preferredColorScheme(.light)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .light))
             #endif
 
         case .dark:
@@ -143,13 +204,13 @@ private struct PreferredAppearanceSheet: ViewModifier {
             content
                 .environment(\.colorScheme, .dark)
                 .preferredColorScheme(.dark)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .dark))
                 .background(SheetStyleBridge(style: .dark).frame(width: 0, height: 0))
             #else
             content
                 .environment(\.colorScheme, .dark)
                 .preferredColorScheme(.dark)
-                .tint(tintColor(for: themeName))
+                .tint(brandTint(for: themeName, scheme: .dark))
             #endif
         }
     }
@@ -161,4 +222,3 @@ extension View {
     func preferredAppearanceHost() -> some View { modifier(PreferredAppearanceHost()) }
     func preferredAppearanceSheet() -> some View { modifier(PreferredAppearanceSheet()) }
 }
-    

@@ -23,9 +23,10 @@ final class AlarmKitScheduler: AlarmScheduling {
     private let log      = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "AlarmKit")
 
     // MARK: Tunables
-    private static let minLeadSecondsFirst  = 45
-    private static let minLeadSecondsNormal = 20
-    private static let protectedWindowSecs  = 8
+    // Longer runway so the system presents the full AK overlay (avoids “single buzz”).
+    private static let minLeadSecondsFirst  = 60
+    private static let minLeadSecondsNormal = 60
+    private static let protectedWindowSecs  = 12
     private static let postAuthSettleMs: UInt64 = 800
 
     private static let defaultSoundFilename: String? = nil
@@ -140,6 +141,20 @@ final class AlarmKitScheduler: AlarmScheduling {
             )
             _ = try await manager.schedule(id: id, configuration: cfg)
 
+            // Diagnostics record (wall clock + uptime)
+            AKDiag.save(
+                id: id,
+                record: AKDiag.Record(
+                    stackName: stack.name,
+                    stepTitle: step.title,
+                    scheduledAt: now,
+                    scheduledUptime: ProcessInfo.processInfo.systemUptime,
+                    targetDate: fireDate,
+                    targetUptime: ProcessInfo.processInfo.systemUptime + TimeInterval(seconds),
+                    seconds: seconds
+                )
+            )
+
             akIDs.append(id)
         }
 
@@ -165,7 +180,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
     }
 
-    // MARK: - AlarmKit Snooze (timer-based; no UN)
+    // MARK: - AlarmKit Snooze (timer-based; AK-only)
 
     /// Schedules a precise AlarmKit timer as a snooze for `minutes` from now.
     @discardableResult
@@ -285,7 +300,7 @@ final class AlarmKitScheduler: AlarmScheduling {
         let ext  = ns.pathExtension
         return Bundle.main.url(forResource: name, withExtension: ext) != nil
     }
-    
+
     // MARK: - Test ring (AlarmKit-only)
 
     @discardableResult
