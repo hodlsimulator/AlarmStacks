@@ -41,8 +41,8 @@
 		E12550D72E501626009BE32A /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 13;
+			dstPath = PlugIns;
+			dstSubfolderSpec = 1;
 			files = (
 				E12550D22E501626009BE32A /* AlarmStacksWidgetExtension.appex in Embed Foundation Extensions */,
 			);
