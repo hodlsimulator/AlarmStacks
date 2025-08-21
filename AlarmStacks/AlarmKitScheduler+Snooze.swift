@@ -137,7 +137,7 @@ extension AlarmKitScheduler {
         // Otherwise (middle snooze), offsetFromFirst(base) += Δ.
         if isFirst {
             defaults.set(stackID, forKey: stackIDKey(for: snoozeID))
-            defaults.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID))   // ✅ fix: offset must be 0 for first-step snooze
+            defaults.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID))   // offset must be 0 for first-step snooze
             defaults.set("timer", forKey: kindKey(for: snoozeID))
         } else {
             let newOffset = baseOffset + delta
@@ -284,6 +284,9 @@ extension AlarmKitScheduler {
                 DiagLog.log("[CHAIN] FAILED to reschedule prev=\(oldID.uuidString) error=\(error)")
             }
         }
+
+        // NOTE: Any Live Activity/widget refresh is handled elsewhere.
+        // We intentionally do not call non-existent helpers here.
     }
 
     // MARK: Cleanup (same keys as base)

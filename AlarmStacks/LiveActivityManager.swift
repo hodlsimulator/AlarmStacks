@@ -6,66 +6,40 @@
 //
 
 import Foundation
-import SwiftUI
 import ActivityKit
-import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @MainActor
 enum LiveActivityManager {
-
     private static var current: Activity<AlarmActivityAttributes>?
-    private static var lastState: AlarmActivityAttributes.ContentState?
 
-    // MARK: - Theme access
+    // MARK: - Helpers
 
-    /// Read the current theme, preferring standard defaults, falling back to App Group.
-    private static func currentThemePayload() -> ThemePayload {
-        let std = UserDefaults.standard.string(forKey: "themeName")
-        let grp = UserDefaults(suiteName: AppGroups.main)?.string(forKey: "themeName")
-        let name = std ?? grp ?? "Default"
-        return ThemeMap.payload(for: name)
-    }
-
-    /// Validate/normalise a hex string; accepts "#RRGGBB"/"RRGGBB" or with alpha (8).
-    private static func cleanHex(_ s: String) -> String? {
-        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.hasPrefix("#") { t.removeFirst() }
-        let hexSet = CharacterSet(charactersIn: "0123456789ABCDEFabcdef")
-        guard (t.count == 6 || t.count == 8), t.unicodeScalars.allSatisfy({ hexSet.contains($0) }) else { return nil }
-        return "#\(t.uppercased())"
-    }
-
-    /// Extract an accent/tint-looking hex **only from the first level** of ThemePayload.
-    /// This avoids deep reflection into SwiftUI types (which can hang).
-    private static func firstLevelAccentHex(from theme: ThemePayload) -> String? {
-        var anyHex: String?
-        let m = Mirror(reflecting: theme)
-        for child in m.children {
-            guard let raw = child.value as? String, let hx = cleanHex(raw) else { continue }
-            if let label = child.label?.lowercased(),
-               (label.contains("accent") || label.contains("tint")) {
-                return hx
-            }
-            if anyHex == nil { anyHex = hx }
+    private static func deviceIsEligibleForLA() -> Bool {
+        #if canImport(UIKit)
+        if UIDevice.current.userInterfaceIdiom != .phone {
+            DiagLog.log("[LA] Not an iPhone; Live Activities don’t render on this device.")
+            return false
         }
-        return anyHex
+        #if targetEnvironment(simulator)
+        DiagLog.log("[LA] Simulator detected; Live Activities aren’t rendered on Simulator.")
+        return false
+        #endif
+        #endif
+
+        let info = ActivityAuthorizationInfo()
+        guard info.areActivitiesEnabled else {
+            DiagLog.log("[LA] areActivitiesEnabled == false (global switch off).")
+            return false
+        }
+        return true
     }
 
-    /// Export the app’s accent hex to both Standard and App Group for the intents path.
-    private static func exportAccentHexFromCurrentTheme() {
-        let theme = currentThemePayload()
-        let hex = firstLevelAccentHex(from: theme) ?? "#3A7BFF" // sane default blue
-        UserDefaults.standard.set(hex, forKey: "themeAccentHex")
-        UserDefaults(suiteName: AppGroups.main)?.set(hex, forKey: "themeAccentHex")
-    }
-
-    // MARK: - Next-step computation
-
+    /// Resolve the next enabled step title + fire date for a stack.
     private static func nextStepInfo(for stack: Stack, calendar: Calendar) -> (title: String, fire: Date)? {
         var base = Date()
-        var firstTitle: String?
-        var firstDate: Date?
-
         for (idx, step) in stack.sortedSteps.enumerated() where step.isEnabled {
             let fire: Date?
             switch step.kind {
@@ -77,131 +51,91 @@ enum LiveActivityManager {
                 if let f = fire { base = f }
             }
             if idx == 0, let f = fire {
-                firstTitle = step.title
-                firstDate  = f
+                return (step.title, f)
             }
         }
-        if let t = firstTitle, let f = firstDate { return (t, f) }
         return nil
+    }
+
+    private static func currentAccentHex() -> String {
+        let std = UserDefaults.standard.string(forKey: "themeAccentHex")
+        let grp = UserDefaults(suiteName: AppGroups.main)?.string(forKey: "themeAccentHex")
+        let hex = std ?? grp ?? "#3A7BFF"
+        // keep intents path fresh
+        UserDefaults(suiteName: AppGroups.main)?.set(hex, forKey: "themeAccentHex")
+        return hex
     }
 
     // MARK: - Public API
 
     static func start(for stack: Stack, calendar: Calendar = .current) async {
+        guard deviceIsEligibleForLA() else { return }
         guard let info = nextStepInfo(for: stack, calendar: calendar) else {
-            NextAlarmBridge.clear()
-            if let activity = current {
-                let st = lastState ?? activity.content.state
-                await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                current = nil; lastState = nil
-            }
+            await end()
             return
         }
 
-        // Widget bridge for the static widget
-        NextAlarmBridge.write(.init(stackName: stack.name, stepTitle: info.title, fireDate: info.fire))
+        let accent = currentAccentHex()
+        DiagLog.log("[LA] startResolved stack=\(stack.name) title=\(info.title) fire=\(info.fire)")
 
-        let enabled = (UserDefaults.standard.object(forKey: "debug.liveActivitiesEnabled") as? Bool) ?? true
-        guard enabled, ActivityAuthorizationInfo().areActivitiesEnabled else { return }
-
-        // Theme for initial content + export accent hex for the App Intents flow.
-        let theme = currentThemePayload()
-        exportAccentHexFromCurrentTheme()
-
-        // Adopt one existing activity; end extras to avoid stacking duplicates
-        if current == nil {
-            let existing = Activity<AlarmActivityAttributes>.activities
-            if let first = existing.first { current = first }
-            for extra in existing.dropFirst() {
-                let st = extra.content.state
-                await extra.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            }
-        }
-
-        // New state/content — ensure firedAt is nil (we haven’t rung yet)
-        let newState = AlarmActivityAttributes.ContentState(
+        let state = AlarmActivityAttributes.ContentState(
             stackName: stack.name,
             stepTitle: info.title,
             ends: info.fire,
             allowSnooze: true,
-            alarmID: "",
-            firedAt: nil,
-            theme: theme
+            alarmID: "",               // filled on ring
+            firedAt: nil,              // pre-ring
+            accentHex: accent
         )
-        let content = ActivityContent(state: newState, staleDate: nil)
+        let content = ActivityContent<AlarmActivityAttributes.ContentState>(state: state, staleDate: nil)
+
+        if let activity = current {
+            await activity.update(content)
+            DiagLog.log("[LA] update success id=\(activity.id)")
+            return
+        }
 
         do {
-            if let activity = current {
-                await activity.update(content)
-            } else {
-                current = try Activity.request(
-                    attributes: AlarmActivityAttributes(),
-                    content: content,
-                    pushType: nil
-                )
-            }
-            lastState = newState
+            current = try Activity.request(
+                attributes: AlarmActivityAttributes(),
+                content: content,
+                pushType: nil
+            )
+            if let id = current?.id { DiagLog.log("[LA] request success id=\(id)") }
         } catch {
-            // ignore
+            DiagLog.log("[LA] request error \(error)")
         }
     }
 
-    /// Mark the activity as fired *now* and keep the theme in sync + re-export accent.
+    /// Mark that the current step started ringing now.
     static func markFiredNow() async {
         guard let activity = current else { return }
-        var st = lastState ?? activity.content.state
+        var st = activity.content.state
         if st.firedAt == nil { st.firedAt = Date() }
-
-        let theme = currentThemePayload()
-        st.theme = theme
-        exportAccentHexFromCurrentTheme()
-
-        let content = ActivityContent(state: st, staleDate: nil)
+        let content = ActivityContent<AlarmActivityAttributes.ContentState>(state: st, staleDate: nil)
         await activity.update(content)
-        lastState = st
+        DiagLog.log("[LA] markFiredNow id=\(activity.id)")
     }
 
-    /// End the Live Activity if its scheduled time has passed (used when app returns to foreground).
+    /// End if time already passed.
     static func endIfExpired() async {
         guard let activity = current else { return }
         let st = activity.content.state
         if st.ends <= Date() {
-            await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            current = nil; lastState = nil
+            let content = ActivityContent<AlarmActivityAttributes.ContentState>(state: st, staleDate: nil)
+            await activity.end(content, dismissalPolicy: .immediate)
+            current = nil
+            DiagLog.log("[LA] endIfExpired (expired)")
         }
     }
 
     static func end() async {
-        NextAlarmBridge.clear()
         if let activity = current {
-            let st = lastState ?? activity.content.state
-            await activity.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            current = nil; lastState = nil
+            let st = activity.content.state
+            let content = ActivityContent<AlarmActivityAttributes.ContentState>(state: st, staleDate: nil)
+            await activity.end(content, dismissalPolicy: .immediate)
+            DiagLog.log("[LA] end id=\(activity.id)")
         }
-    }
-
-    /// Call this when theme changes (and at app foreground) to recolour running activities.
-    static func resyncThemeForActiveActivities() async {
-        let theme = currentThemePayload()
-
-        for activity in Activity<AlarmActivityAttributes>.activities {
-            var st = activity.content.state
-            if st.theme != theme {
-                st.theme = theme
-                await activity.update(ActivityContent(state: st, staleDate: nil))
-            }
-        }
-
-        // Keep our cached state aligned if we’re tracking one
-        if let activity = current {
-            var st = lastState ?? activity.content.state
-            if st.theme != theme {
-                st.theme = theme
-                lastState = st
-            }
-        }
-
-        // Refresh the accent export for App Intents.
-        exportAccentHexFromCurrentTheme()
+        current = nil
     }
 }

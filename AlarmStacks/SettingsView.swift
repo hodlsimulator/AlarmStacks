@@ -18,7 +18,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                // Premium / Plus
+                // Plus
                 Section {
                     HStack {
                         Label(store.isPlus ? "AlarmStacks Plus" : "Get AlarmStacks Plus",
@@ -37,7 +37,7 @@ struct SettingsView: View {
                     }
                 }
 
-                // Themes (Plus unlocks extra)
+                // Themes (Plus unlocks extras)
                 ThemePickerView { showingPaywall = true }
 
                 // Appearance selector (system / light / dark)
@@ -56,43 +56,22 @@ struct SettingsView: View {
                         .singleLineTightTail()
                 }
 
-                // Sound info
+                // Sound info (release-safe)
                 SoundSettingsSection()
 
-                // Debug toggles
-                DebugSettingsSection()
-
-                // Alarm loudness guidance
+                // Guidance (keep the advice; remove the test ring)
                 Section("Alarm loudness") {
-                    Button("Ring a test alarm in 5 seconds") {
-                        Task { _ = await AlarmKitScheduler.shared.scheduleTestRing(in: 5) }
-                    }
-                    .buttonStyle(.borderedProminent)
-
                     Text("Alarms use your iPhone’s **Ringer & Alerts** volume. To keep them loud, raise the slider in **Settings → Sounds & Haptics** and consider turning **Change with Buttons** off so accidental button presses don’t lower it. If alarms seem to fade when you look at the phone, turn off **Attention Aware Features** in **Settings → Face ID & Attention**.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .singleLineTightTail()
                 }
 
-                // Diagnostics
-                Section("Diagnostics") {
-                    NavigationLink("Diagnostics Log") { DiagnosticsLogView() }
-                }
-
-                // About / Version
-                Section("About") {
-                    HStack {
-                        Text("Version")
-                        Spacer()
-                        Text(versionString)
-                            .foregroundStyle(.secondary)
-                            .singleLineTightTail()
-                    }
-                }
-
+                // IAP restore (only when needed)
                 if !store.isPlus {
-                    Section { Button("Restore Purchases") { Task { await store.restore() } } }
+                    Section {
+                        Button("Restore Purchases") { Task { await store.restore() } }
+                    }
                 }
             }
             // Let the sheet show system Liquid Glass; don’t paint the sheet.

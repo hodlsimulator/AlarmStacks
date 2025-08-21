@@ -84,7 +84,7 @@ final class AlarmController: ObservableObject {
                                     )
                                 }
 
-                                // Snooze set vs actual + signed delta (positive = early, negative = late)
+                                // Snooze: set vs actual + signed delta (+ = early, - = late)
                                 var snoozeDetail = ""
                                 if rec.kind == .snooze, let baseStr = rec.baseID, let baseUUID = UUID(uuidString: baseStr) {
                                     let setSeconds = Double(rec.seconds)
@@ -92,7 +92,7 @@ final class AlarmController: ObservableObject {
                                     if let (tapWall, tapUp) = AKDiag.loadSnoozeTap(for: baseUUID) {
                                         let tapWallΔ   = now.timeIntervalSince(tapWall)
                                         let tapUpΔ     = upNow - tapUp
-                                        let tapDeltaVsSet = setSeconds - tapWallΔ   // + = early, - = late
+                                        let tapDeltaVsSet = setSeconds - tapWallΔ
 
                                         let schedWallΔ = now.timeIntervalSince(rec.scheduledAt)
                                         let schedUpΔ   = upNow - rec.scheduledUptime
@@ -128,7 +128,7 @@ final class AlarmController: ObservableObject {
 
                                 AKDiag.remove(id: a.id)
                             } else {
-                                // Fallback: we only know the effective target via expected key
+                                // Fallback: only know effective target via expected key
                                 let wallEffΔ = now.timeIntervalSince(expectedEff)
                                 DiagLog.log(String(
                                     format: "AK alerting id=%@ env={%@} effΔ=%.3fs effTarget=%@",
@@ -141,7 +141,7 @@ final class AlarmController: ObservableObject {
                         }
                         // -----------------------------------------
 
-                        // Live Activity stamp
+                        // Live Activity stamp (set firedAt and re-sync theme)
                         Task { await LiveActivityManager.markFiredNow() }
                     } else {
                         self.alertingAlarm = nil
@@ -170,13 +170,13 @@ final class AlarmController: ObservableObject {
 
     func snooze(_ id: UUID) {
         #if canImport(AlarmKit)
-        // Capture the tap moment (for tap→alert measurement)
+        // Capture tap moment (for tap→alert measurement)
         AKDiag.rememberSnoozeTap(for: id)
 
         // Silence the current ring immediately.
         try? manager.stop(id: id)
 
-        // Read the per-alarm snooze settings we persisted when scheduling.
+        // Read per-alarm snooze settings persisted when scheduling.
         let ud = UserDefaults.standard
         let minutes   = max(1, ud.integer(forKey: "ak.snoozeMinutes.\(id.uuidString)"))
         let stackName = ud.string(forKey: "ak.stackName.\(id.uuidString)") ?? "Alarm"

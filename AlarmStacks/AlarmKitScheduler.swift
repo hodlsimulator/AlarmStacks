@@ -214,7 +214,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             let attrs  = makeAttributes(alert: alert, tint: tintNow)
             let sound  = resolveSound(forStepName: step.soundName)
 
-            // Intent actions
+            // Intents
             let stopI   = StopAlarmIntent(alarmID: id.uuidString)
             let snoozeI = step.allowSnooze ? SnoozeAlarmIntent(alarmID: id.uuidString) : nil
 
@@ -249,7 +249,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             // Persist stackID + offset-from-first + kind label
             defaults.set(stack.id.uuidString, forKey: stackIDKey(for: id))
             if let f = firstNominal {
-                let off = nominalFireDate.timeIntervalSince(f) // Double
+                let off = nominalFireDate.timeIntervalSince(f)
                 defaults.set(off, forKey: offsetFromFirstKey(for: id))
             } else {
                 defaults.set(0.0, forKey: offsetFromFirstKey(for: id))
@@ -288,24 +288,30 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         if firstRun { hasScheduledOnceAK = true }
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
 
+        DiagLog.log("[LA] schedule -> triggering LiveActivityManager.start(for: \(stack.name))")
         await LiveActivityManager.start(for: stack, calendar: calendar)
+
         return akIDs.map(\.uuidString)
     }
-
+    
     func cancelAll(for stack: Stack) async {
-        let key = storageKey(for: stack)
-        for s in (defaults.stringArray(forKey: key) ?? []) {
-            if let id = UUID(uuidString: s) {
-                try? manager.cancel(id: id)
-                cleanupExpectationAndMetadata(for: id)
+            let key = storageKey(for: stack)
+            for s in (defaults.stringArray(forKey: key) ?? []) {
+                if let id = UUID(uuidString: s) {
+                    try? manager.cancel(id: id)
+                    cleanupExpectationAndMetadata(for: id)
+                }
+            }
+            defaults.removeObject(forKey: key)
+        }
+
+        func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
+            for s in stacks where s.isArmed {
+                _ = try? await schedule(stack: s, calendar: calendar)
+                // Kick Live Activity even if schedule() skipped due to the protected window
+                await LiveActivityManager.start(for: s, calendar: calendar)
             }
         }
-        defaults.removeObject(forKey: key)
-    }
-
-    func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
-        for s in stacks where s.isArmed { _ = try? await schedule(stack: s, calendar: calendar) }
-    }
 
     // MARK: - ChainAlarmSchedulingAdapter (used by ChainSnoozeCoordinator)
 

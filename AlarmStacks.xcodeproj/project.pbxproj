@@ -80,6 +80,7 @@
 		E125516D2E517E03009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacksWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				"AlarmActivityAttributes+Shared.swift",
 				AlarmControlIntents.swift,
 				AppGroups.swift,
 				NextAlarmBridge.swift,
@@ -87,13 +88,6 @@
 				"View+SingleLineTightTail.swift",
 			);
 			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;
-		};
-		E12551D62E5203C5009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacks" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				AlarmActivityAttributes.swift,
-			);
-			target = E125507D2E50108B009BE32A /* AlarmStacks */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
@@ -120,7 +114,6 @@
 		E12550C82E501624009BE32A /* AlarmStacksWidget */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				E12551D62E5203C5009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacks" target */,
 				E12550D62E501626009BE32A /* Exceptions for "AlarmStacksWidget" folder in "AlarmStacksWidgetExtension" target */,
 			);
 			path = AlarmStacksWidget;
