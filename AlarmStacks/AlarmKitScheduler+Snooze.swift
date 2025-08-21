@@ -56,7 +56,7 @@ extension AlarmKitScheduler {
         minutes: Int
     ) async -> String? {
 
-        // Cancel an existing active snooze tied to this base (if any)
+        // Cancel any active snooze mapped to this base
         if let existing = defaults.string(forKey: snoozeMapKey(for: baseAlarmID)),
            let existingID = UUID(uuidString: existing) {
             try? manager.cancel(id: existingID)
@@ -78,33 +78,29 @@ extension AlarmKitScheduler {
         let baseOffset = (defaults.object(forKey: offsetFromFirstKey(for: baseAlarmID)) as? Double) ?? 0
         let isFirst    = abs(baseOffset) < 0.5
 
-        // Compute Δ strictly from nominal: oldNominal(base) = first + offset
         let oldNominal = firstDate.addingTimeInterval(baseOffset)
 
-        // New snooze fire time (effective), ≥ 60 s from now
+        // New snooze time (effective), ≥ 60 s from now
         let snoozeSecs = max(Self.minLeadSecondsNormal, minutes * 60)
         let newBase    = Date().addingTimeInterval(TimeInterval(snoozeSecs))
         let delta      = newBase.timeIntervalSince(oldNominal)
 
-        // Build snooze alert (always allows re-snooze)
-        let stop  = AlarmButton(text: LocalizedStringResource("Stop"),  textColor: .white, systemImageName: "stop.fill")
-        let again = AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "zzz")
-
-        // Carry the exact accent/sound of the base alarm
+        // Carry accent/sound of the base alarm
         let carriedHex  = defaults.string(forKey: accentHexKey(for: baseAlarmID)) ?? groupDefaults?.string(forKey: accentHexKey(for: baseAlarmID))
         let tint: SwiftUI.Color = {
             if let hx = carriedHex, !hx.isEmpty { return colorFromHex(hx) }
             return ThemeTintResolver.currentAccent()
         }()
         let carriedSound = defaults.string(forKey: soundKey(for: baseAlarmID))
-        let attrs = AlarmAttributes<EmptyMetadata>(
-            presentation: AlarmPresentation(alert:
-                AlarmPresentation.Alert(title: LocalizedStringResource("\(stackName) — \(stepTitle)"),
-                                        stopButton: stop,
-                                        secondaryButton: again,
-                                        secondaryButtonBehavior: .countdown)),
-            tintColor: tint
-        )
+
+        let stop  = AlarmButton(text: LocalizedStringResource("Stop"),  textColor: .white, systemImageName: "stop.fill")
+        let again = AlarmButton(text: LocalizedStringResource("Snooze"), textColor: .white, systemImageName: "zzz")
+        let attrs = AlarmAttributes<EmptyMetadata>(presentation: AlarmPresentation(alert:
+                            AlarmPresentation.Alert(title: LocalizedStringResource("\(stackName) — \(stepTitle)"),
+                                                    stopButton: stop,
+                                                    secondaryButton: again,
+                                                    secondaryButtonBehavior: .countdown)),
+                                                   tintColor: tint)
 
         // Schedule the snooze timer itself
         let snoozeID = UUID()
@@ -122,22 +118,20 @@ extension AlarmKitScheduler {
             return nil
         }
 
-        // Persist snooze metadata (EFFECTIVE target only)
+        // Persist snooze metadata (effective target only)
         defaults.set(newBase.timeIntervalSince1970, forKey: effTargetKey(for: snoozeID))
         defaults.set(snoozeID.uuidString, forKey: snoozeMapKey(for: baseAlarmID))
-        defaults.set(minutes, forKey: snoozeMinutesKey(for: snoozeID))
-        defaults.set(stackName, forKey: stackNameKey(for: snoozeID))
-        defaults.set(stepTitle, forKey: stepTitleKey(for: snoozeID))
+        defaults.set(minutes, forKey: "ak.snoozeMinutes.\(snoozeID.uuidString)")
+        defaults.set(stackName, forKey: "ak.stackName.\(snoozeID.uuidString)")
+        defaults.set(stepTitle, forKey: "ak.stepTitle.\(snoozeID.uuidString)")
         if let n = carriedSound, !n.isEmpty { defaults.set(n, forKey: soundKey(for: snoozeID)) }
         if let hx = carriedHex { defaults.set(hx, forKey: accentHexKey(for: snoozeID)) }
-        defaults.set(true, forKey: allowSnoozeKey(for: snoozeID)) // snooze alert always re-snoozable
+        defaults.set(true, forKey: allowSnoozeKey(for: snoozeID)) // snooze always re-snoozable
 
-        // IMPORTANT: give the snooze its correct chain mapping.
-        // If the base was the FIRST step, the snooze becomes the new base => offset 0.
-        // Otherwise (middle snooze), offsetFromFirst(base) += Δ.
+        // Chain mapping for the snooze id
         if isFirst {
             defaults.set(stackID, forKey: stackIDKey(for: snoozeID))
-            defaults.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID))   // ✅ fix: offset must be 0 for first-step snooze
+            defaults.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID)) // first snooze becomes new base
             defaults.set("timer", forKey: kindKey(for: snoozeID))
         } else {
             let newOffset = baseOffset + delta
@@ -148,8 +142,11 @@ extension AlarmKitScheduler {
 
         DiagLog.log("AK snooze schedule base=\(baseAlarmID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(DiagLog.f(newBase)) Δ=\(String(format: "%.3fs", delta)) baseOffset=\(String(format: "%.1fs", baseOffset)) isFirst=\(isFirst ? "y":"n")")
 
-        // Chain shift — and update the tracked ids to include the snooze in place of base
+        // Apply the shift
         await shiftChainAfterSnooze(baseAlarmID: baseAlarmID, newBase: newBase, snoozeID: snoozeID, baseIsFirst: isFirst, delta: delta, firstDate: firstDate, baseOffset: baseOffset, stackID: stackID, snoozeSecs: snoozeSecs)
+
+        // 🔔 Single bump per snooze operation
+        ScheduleRevision.bump("snooze")
 
         return snoozeID.uuidString
     }
@@ -173,7 +170,7 @@ extension AlarmKitScheduler {
             return
         }
 
-        // Replace base id -> snooze id in the tracked list
+        // Replace base with snooze id
         if let idx = tracked.firstIndex(of: baseAlarmID.uuidString) {
             tracked[idx] = snoozeID.uuidString
             defaults.set(tracked, forKey: storageKey(forStackID: stackID))
@@ -182,7 +179,7 @@ extension AlarmKitScheduler {
             defaults.set(tracked, forKey: storageKey(forStackID: stackID))
         }
 
-        // Update anchor
+        // Update anchor / offset
         if baseIsFirst {
             defaults.set(newBase.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stackID))
         } else {
@@ -192,7 +189,7 @@ extension AlarmKitScheduler {
         DiagLog.log(String(format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
                            stackID, baseAlarmID.uuidString, snoozeID.uuidString, DiagLog.f(newBase), delta, baseOffset, baseIsFirst ? "y":"n"))
 
-        // Reschedule impacted steps — DO NOT gate on 'expected/nominal' presence.
+        // Reschedule impacted steps
         for oldStr in tracked {
             guard let oldID = UUID(uuidString: oldStr) else { continue }
             if oldID == baseAlarmID || oldID == snoozeID { continue }
@@ -209,7 +206,7 @@ extension AlarmKitScheduler {
             }
             if baseIsFirst == false && off <= baseOffset { continue }
 
-            // Carry metadata BEFORE cleanup (fallbacks if missing)
+            // Carry metadata
             let stackName  = defaults.string(forKey: "ak.stackName.\(oldID.uuidString)") ?? "Alarm"
             let stepTitle  = defaults.string(forKey: "ak.stepTitle.\(oldID.uuidString)") ?? "Step"
             let allow      = (defaults.object(forKey: allowSnoozeKey(for: oldID)) as? Bool) ?? false
@@ -224,7 +221,7 @@ extension AlarmKitScheduler {
             let newNominal = baseIsFirst ? newBase.addingTimeInterval(off)
                                          : firstDate.addingTimeInterval(newOffset)
 
-            // Enforce ≥60 s lead; guarantee snooze comes first in first-step case
+            // Enforce ≥60 s lead; guarantee snooze is earliest if baseIsFirst
             let now = Date()
             let raw = max(0, newNominal.timeIntervalSince(now))
             var secs = max(Self.minLeadSecondsNormal, Int(ceil(raw)))
@@ -235,7 +232,7 @@ extension AlarmKitScheduler {
             try? manager.cancel(id: oldID)
             cleanupMetadata(for: oldID)
 
-            // Schedule replacement
+            // Replacement schedule
             let newID = UUID()
             let title: LocalizedStringResource = LocalizedStringResource("\(stackName) — \(stepTitle)")
             let stop = AlarmButton(text: LocalizedStringResource("Stop"), textColor: .white, systemImageName: "stop.fill")
@@ -261,7 +258,7 @@ extension AlarmKitScheduler {
                 )
                 _ = try await manager.schedule(id: newID, configuration: cfg)
 
-                // Persist new id metadata (nominal for steps)
+                // Persist new id metadata
                 defaults.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID))
                 defaults.set(stackName,  forKey: "ak.stackName.\(newID.uuidString)")
                 defaults.set(stepTitle,  forKey: "ak.stepTitle.\(newID.uuidString)")

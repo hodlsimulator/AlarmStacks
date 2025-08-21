@@ -9,10 +9,18 @@ import ActivityKit
 import SwiftUI
 
 public struct AlarmActivityAttributes: ActivityAttributes {
+    // Static attributes for the whole activity instance (one per stack)
+    public var stackID: String
+
+    public init(stackID: String) {
+        self.stackID = stackID
+    }
+
+    // Mutable content state
     public struct ContentState: Codable, Hashable {
         public var stackName: String
         public var stepTitle: String
-        public var ends: Date               // scheduled ring time
+        public var ends: Date               // scheduled ring time (effective for timers / snoozes)
         public var allowSnooze: Bool
         public var alarmID: String          // AlarmKit UUID string if available
         public var firedAt: Date?           // actual ring moment (set when alerting)
@@ -62,5 +70,4 @@ public struct AlarmActivityAttributes: ActivityAttributes {
             try c.encode(theme, forKey: .theme)
         }
     }
-    public init() { }
 }

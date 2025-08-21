@@ -36,7 +36,6 @@ enum LiveActivityManager {
     }
 
     /// Extract an accent/tint-looking hex **only from the first level** of ThemePayload.
-    /// This avoids deep reflection into SwiftUI types (which can hang).
     private static func firstLevelAccentHex(from theme: ThemePayload) -> String? {
         var anyHex: String?
         let m = Mirror(reflecting: theme)
@@ -108,11 +107,14 @@ enum LiveActivityManager {
         let theme = currentThemePayload()
         exportAccentHexFromCurrentTheme()
 
-        // Adopt one existing activity; end extras to avoid stacking duplicates
+        // Adopt existing activity for this stack, end extras (avoid duplicates)
+        let attrs = AlarmActivityAttributes(stackID: stack.id.uuidString)
         if current == nil {
             let existing = Activity<AlarmActivityAttributes>.activities
-            if let first = existing.first { current = first }
-            for extra in existing.dropFirst() {
+            if let match = existing.first(where: { $0.attributes.stackID == stack.id.uuidString }) {
+                current = match
+            }
+            for extra in existing where extra.attributes.stackID != stack.id.uuidString {
                 let st = extra.content.state
                 await extra.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
             }
@@ -131,11 +133,11 @@ enum LiveActivityManager {
         let content = ActivityContent(state: newState, staleDate: nil)
 
         do {
-            if let activity = current {
+            if let activity = current, activity.attributes.stackID == stack.id.uuidString {
                 await activity.update(content)
             } else {
                 current = try Activity.request(
-                    attributes: AlarmActivityAttributes(),
+                    attributes: attrs,
                     content: content,
                     pushType: nil
                 )
@@ -180,7 +182,124 @@ enum LiveActivityManager {
         }
     }
 
-    /// Call this when theme changes (and at app foreground) to recolour running activities.
+    // MARK: - Reconcile from App Group (used by Stop/Snooze intents)
+
+    /// Rebuild/refresh the LA for a given stack by scanning the App Group state
+    /// and selecting the next upcoming alarm (effective target if present).
+    static func refreshFromAppGroup(stackID: String) async {
+        let ud = UserDefaults.standard
+
+        let ids = ud.stringArray(forKey: "alarmkit.ids.\(stackID)") ?? []
+        if ids.isEmpty {
+            // Nothing tracked for this stack — end any running activity for it.
+            await endActivity(forStackID: stackID)
+            return
+        }
+
+        // Anchor for offsets (nominal path)
+        let firstEpoch = ud.double(forKey: "ak.firstTarget.\(stackID)")
+        let now = Date()
+
+        struct Candidate {
+            var id: String
+            var date: Date
+            var stackName: String
+            var stepTitle: String
+            var allowSnooze: Bool
+        }
+
+        var best: Candidate?
+        for s in ids {
+            guard let uuid = UUID(uuidString: s) else { continue }
+
+            let stackName = ud.string(forKey: "ak.stackName.\(uuid.uuidString)") ?? "Alarm"
+            let stepTitle = ud.string(forKey: "ak.stepTitle.\(uuid.uuidString)") ?? "Step"
+            let allow     = (ud.object(forKey: "ak.allowSnooze.\(uuid.uuidString)") as? Bool) ?? false
+
+            // Effective first (timer/snooze), otherwise expected, otherwise derive from (first + offset).
+            let effEpoch = ud.double(forKey: "ak.effTarget.\(uuid.uuidString)")
+            let expEpoch = ud.double(forKey: "ak.expected.\(uuid.uuidString)")
+            let off      = (ud.object(forKey: "ak.offsetFromFirst.\(uuid.uuidString)") as? Double)
+
+            let date: Date? = {
+                if effEpoch > 0 { return Date(timeIntervalSince1970: effEpoch) }
+                if expEpoch > 0 { return Date(timeIntervalSince1970: expEpoch) }
+                if firstEpoch > 0, let off = off {
+                    return Date(timeIntervalSince1970: firstEpoch + off)
+                }
+                return nil
+            }()
+
+            guard let d = date else { continue }
+            // Ignore anything clearly in the past with a small tolerance.
+            if d < now.addingTimeInterval(-2) { continue }
+
+            if let b = best {
+                if d < b.date { best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow) }
+            } else {
+                best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow)
+            }
+        }
+
+        guard let chosen = best else {
+            // No future events — end any running activity for the stack.
+            await endActivity(forStackID: stackID)
+            return
+        }
+
+        // Theme & accent export
+        let theme = currentThemePayload()
+        exportAccentHexFromCurrentTheme()
+
+        // Write widget bridge
+        NextAlarmBridge.write(.init(stackName: chosen.stackName, stepTitle: chosen.stepTitle, fireDate: chosen.date))
+
+        // Adopt or create activity for this stack; clear ringing state
+        let attrs = AlarmActivityAttributes(stackID: stackID)
+        let existing = Activity<AlarmActivityAttributes>.activities
+        let activity = existing.first(where: { $0.attributes.stackID == stackID })
+
+        let newState = AlarmActivityAttributes.ContentState(
+            stackName: chosen.stackName,
+            stepTitle: chosen.stepTitle,
+            ends: chosen.date,
+            allowSnooze: chosen.allowSnooze,
+            alarmID: chosen.id,
+            firedAt: nil,                 // ✅ clear 'ringing'
+            theme: theme
+        )
+        let content = ActivityContent(state: newState, staleDate: nil)
+
+        do {
+            if let a = activity {
+                await a.update(content)
+                if current?.id == a.id { lastState = newState }
+            } else {
+                let req = try Activity.request(attributes: attrs, content: content, pushType: nil)
+                current = req
+                lastState = newState
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    private static func endActivity(forStackID stackID: String) async {
+        let existing = Activity<AlarmActivityAttributes>.activities
+        for a in existing where a.attributes.stackID == stackID {
+            let st = a.content.state
+            await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+        }
+        if current?.attributes.stackID == stackID {
+            current = nil; lastState = nil
+        }
+        NextAlarmBridge.clear()
+    }
+
+    // MARK: - Theme resync (used by ThemeSync.swift)
+
+    /// Recolour running activities to match the current in-app theme.
+    /// This keeps LA visuals and the App Intents accent in sync.
     static func resyncThemeForActiveActivities() async {
         let theme = currentThemePayload()
 

@@ -146,6 +146,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
     // MARK: - Scheduling (initial, per stack)
 
+    @MainActor
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         try await requestAuthorizationIfNeeded()
 
@@ -173,7 +174,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             DiagLog.log("AK decision ctx: firstRun=\(firstRun) (no enabled steps)")
         }
 
-        // Resolve the active accent ONCE for this scheduling pass.
+        // Resolve the active accent once for this pass and export for intents/widget.
         let tintNow = ThemeTintResolver.currentAccent()
         #if canImport(UIKit)
         if let hexNow = hex(from: tintNow) {
@@ -182,7 +183,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         }
         #endif
 
-        // Track the first enabled step's nominal target for offset persistence.
+        // Track first enabled step’s nominal for offsets.
         var firstNominal: Date?
 
         for step in stack.sortedSteps where step.isEnabled {
@@ -201,7 +202,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
                 defaults.set(nominalFireDate.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stack.id.uuidString))
             }
 
-            // Effective schedule is at least minLead from NOW.
+            // Effective ≥ minLead from now.
             let now = Date()
             let rawLead = max(0, nominalFireDate.timeIntervalSince(now))
             let seconds = max(minLead, Int(ceil(rawLead)))
@@ -214,7 +215,6 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             let attrs  = makeAttributes(alert: alert, tint: tintNow)
             let sound  = resolveSound(forStepName: step.soundName)
 
-            // Intent actions
             let stopI   = StopAlarmIntent(alarmID: id.uuidString)
             let snoozeI = step.allowSnooze ? SnoozeAlarmIntent(alarmID: id.uuidString) : nil
 
@@ -229,7 +229,6 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             log.info("AK schedule id=\(id.uuidString, privacy: .public) secs=\(seconds, privacy: .public) eff=\(effectiveTarget as NSDate, privacy: .public) nominal=\(nominalFireDate as NSDate, privacy: .public) stack=\(stack.name, privacy: .public) step=\(step.title, privacy: .public)")
             DiagLog.log("AK schedule id=\(id.uuidString) secs=\(seconds)s effTarget=\(DiagLog.f(effectiveTarget)) nominal=\(DiagLog.f(nominalFireDate)); stack=\(stack.name); step=\(step.title)")
 
-            // Persist **effective** target for diagnostics; chain maths is firstTarget+offsets.
             defaults.set(effectiveTarget.timeIntervalSince1970, forKey: effTargetKey(for: id))
 
             if let n = step.soundName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
@@ -246,10 +245,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             }
             #endif
 
-            // Persist stackID + offset-from-first + kind label
             defaults.set(stack.id.uuidString, forKey: stackIDKey(for: id))
             if let f = firstNominal {
-                let off = nominalFireDate.timeIntervalSince(f) // Double
+                let off = nominalFireDate.timeIntervalSince(f)
                 defaults.set(off, forKey: offsetFromFirstKey(for: id))
             } else {
                 defaults.set(0.0, forKey: offsetFromFirstKey(for: id))
@@ -289,6 +287,10 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
 
         await LiveActivityManager.start(for: stack, calendar: calendar)
+
+        // 🔔 SINGLE place to signal chain change to widget + logs
+        ScheduleRevision.bump("chainShift")
+
         return akIDs.map(\.uuidString)
     }
 
@@ -376,6 +378,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
                 )
 
                 DiagLog.log("[AK] adapter schedule id=\(uuid.uuidString) secs=\(seconds)s effTarget=\(DiagLog.f(target)) allowSnooze=\(allowSnooze)")
+
+                // 🔔 Inform widget about this ad-hoc schedule
+                ScheduleRevision.bump("adapterSchedule")
             } catch {
                 DiagLog.log("[AK] adapter schedule FAILED id=\(uuid.uuidString) error=\(error)")
             }
