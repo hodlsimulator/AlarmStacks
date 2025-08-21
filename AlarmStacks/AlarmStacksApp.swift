@@ -93,6 +93,7 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
     @StateObject private var router = ModalRouter.shared
     @StateObject private var store = Store.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         #if DEBUG
@@ -124,6 +125,26 @@ struct AlarmStacksApp: App {
                 // SK2: products, updates stream, entitlements — at launch
                 await store.configureAtLaunch()
                 store.debugFetchProducts() // one clear log line on TestFlight devices
+            }
+            // DEBUG smoke test + foreground reconciliation for Live Activities
+            .onAppear {
+                #if DEBUG
+                LiveActivitySmokeTest.kick()
+                #endif
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    Task {
+                        // End any stale LA that already passed while the app was foreground.
+                        await LiveActivityManager.endIfExpired()
+                        // Keep tint in sync with the app’s theme.
+                        await LiveActivityManager.resyncThemeForActiveActivities()
+                        #if DEBUG
+                        // Make sure we see a Live Activity while iterating.
+                        LiveActivitySmokeTest.kick()
+                        #endif
+                    }
+                }
             }
         }
         .modelContainer(for: [Stack.self, Step.self])

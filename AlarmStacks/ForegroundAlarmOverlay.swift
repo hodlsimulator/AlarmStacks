@@ -24,7 +24,12 @@ struct ForegroundAlarmOverlay: ViewModifier {
                     .zIndex(999)
             }
         }
-        .onAppear { controller.startObserversIfNeeded() }
+        .onAppear { controller.startObserversIfNeeded()
+            
+            #if DEBUG
+            LiveActivitySmokeTest.kick()
+            #endif
+        }
         .animation(.spring(), value: controller.alertingAlarm?.id)
         #else
         content
