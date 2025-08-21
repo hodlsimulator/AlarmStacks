@@ -93,6 +93,7 @@ struct AlarmStacksApp: App {
     private let notificationDelegate = NotificationDelegate()
     @StateObject private var router = ModalRouter.shared
     @StateObject private var store = Store.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         #if DEBUG
@@ -101,6 +102,9 @@ struct AlarmStacksApp: App {
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
+
+        // Enable sanitiser immediately (active mode + canceller + launch pass)
+        AppLifecycleSanitiser.start()
     }
 
     var body: some Scene {
@@ -127,5 +131,13 @@ struct AlarmStacksApp: App {
             }
         }
         .modelContainer(for: [Stack.self, Step.self])
+        // Foreground pass using the new iOS 17+ onChange two-parameter variant.
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                Task { @MainActor in
+                    AppLifecycleSanitiser.foregroundPass()
+                }
+            }
+        }
     }
 }
