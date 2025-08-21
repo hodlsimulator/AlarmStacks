@@ -260,6 +260,11 @@ struct ContentView: View {
             .dismissKeyboardOnTapAnywhere()
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
+            // Bottom-centre version badge (root list only)
+            .safeAreaInset(edge: .bottom) {
+                VersionBadge()
+                    .allowsHitTesting(false)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { router.showSettings() } label: {
@@ -345,7 +350,7 @@ struct ContentView: View {
         Task { @MainActor in
             if !busyStacks.contains(stack.id) {
                 busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) }
+                defer { busyStacks.remove(stack.id) }   // ✅ fixed (was s.id)
                 await AlarmScheduler.shared.cancelAll(for: stack)
             }
             modelContext.delete(stack)
@@ -415,7 +420,7 @@ private struct StackRow: View {
                 Text(stack.name)
                     .font(.headline)
                     .layoutPriority(1)
-                    .singleLineTightTail() // keep name to one line / ellipsis
+                    .singleLineTightTail()
 
                 if stack.isArmed {
                     Image(systemName: "bell.and.waves.left.and.right.fill")
@@ -560,21 +565,20 @@ private struct StackCard<Content: View>: View {
                     .strokeBorder(color.opacity(scheme == .dark ? 0.55 : 0.45), lineWidth: 1)
             )
             .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.10), radius: 10, x: 0, y: 6)
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous)) // card shape tappable
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
 private func stackAccent(for stack: Stack) -> Color {
-    // A gentle, readable pastel palette for per-stack accents.
     let palette: [Color] = [
-        Color(red: 0.70, green: 0.83, blue: 1.00), // pastel blue
-        Color(red: 0.74, green: 0.90, blue: 0.82), // pastel green
-        Color(red: 1.00, green: 0.86, blue: 0.67), // pastel orange
-        Color(red: 0.87, green: 0.79, blue: 0.99), // pastel purple
-        Color(red: 1.00, green: 0.78, blue: 0.88), // pastel pink
-        Color(red: 0.78, green: 0.92, blue: 0.92), // pastel teal
-        Color(red: 0.81, green: 0.86, blue: 1.00), // pastel indigo
-        Color(red: 1.00, green: 0.92, blue: 0.68)  // pastel yellow
+        Color(red: 0.70, green: 0.83, blue: 1.00),
+        Color(red: 0.74, green: 0.90, blue: 0.82),
+        Color(red: 1.00, green: 0.86, blue: 0.67),
+        Color(red: 0.87, green: 0.79, blue: 0.99),
+        Color(red: 1.00, green: 0.78, blue: 0.88),
+        Color(red: 0.78, green: 0.92, blue: 0.92),
+        Color(red: 0.81, green: 0.86, blue: 1.00),
+        Color(red: 1.00, green: 0.92, blue: 0.68)
     ]
     let idx = abs(stack.id.uuidString.hashValue) % palette.count
     return palette[idx]
@@ -601,5 +605,46 @@ private struct EmptyState: View {
         }
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.vertical, 24)
+    }
+}
+
+// MARK: - Version badge
+
+private struct VersionBadge: View {
+    private var localVersionString: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        return "\(v) (\(b))"
+    }
+
+    var body: some View {
+        HStack {
+            Spacer()
+            Text(localVersionString)
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                // Engraved effect: reversed bevel inside the glyphs
+                .overlay(
+                    Text(localVersionString)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.black.opacity(0.35))
+                        .offset(x: -0.5, y: -0.5)
+                        .blur(radius: 0.6)
+                        .blendMode(.multiply)
+                )
+                .overlay(
+                    Text(localVersionString)
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .offset(x: 0.6, y: 0.6)
+                        .blur(radius: 0.7)
+                        .blendMode(.screen)
+                )
+                .compositingGroup()
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            Spacer()
+        }
+        .padding(.bottom, 6)
     }
 }

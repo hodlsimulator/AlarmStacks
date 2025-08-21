@@ -15,14 +15,6 @@ struct SettingsView: View {
 
     @State private var showingPaywall = false
 
-    // MARK: - App Version
-
-    private var versionString: String {
-        let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0"
-        let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "-"
-        return "\(v) (\(b))"
-    }
-
     var body: some View {
         NavigationStack {
             Form {
