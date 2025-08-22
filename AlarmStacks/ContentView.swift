@@ -16,6 +16,8 @@ private struct ShareItem: Identifiable {
     let url: URL
 }
 
+// MARK: - Stack Detail
+
 private struct StackDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme)  private var systemScheme
@@ -43,8 +45,17 @@ private struct StackDetailView: View {
                     isBusy = true
                     Task { @MainActor in
                         if newVal {
+                            if !canArm(stack: stack) {
+                                stack.isArmed = false
+                                try? modelContext.save()
+                                isBusy = false
+                                return
+                            }
+                            await AlarmScheduler.shared.cancelAll(for: stack)
                             if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: calendar)) != nil {
                                 stack.isArmed = true
+                            } else {
+                                stack.isArmed = false
                             }
                         } else {
                             await AlarmScheduler.shared.cancelAll(for: stack)
@@ -81,13 +92,25 @@ private struct StackDetailView: View {
         .navigationTitle(stack.name)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    router.presentAddStep(for: stack) // step gate handled in router
-                } label: {
+                Button { router.presentAddStep(for: stack) } label: {
                     Label("Add Step", systemImage: "plus")
                 }
             }
         }
+    }
+
+    private func canArm(stack: Stack) -> Bool { nextStart(for: stack) != nil }
+
+    private func nextStart(for stack: Stack) -> Date? {
+        let base = Date()
+        for step in stack.sortedSteps where step.isEnabled {
+            switch step.kind {
+            case .fixedTime, .timer, .relativeToPrev:
+                if let d = try? step.nextFireDate(basedOn: base, calendar: calendar) { return d }
+                else { return nil }
+            }
+        }
+        return nil
     }
 }
 
@@ -95,13 +118,18 @@ private struct StepRow: View {
     @Bindable var step: Step
     var body: some View {
         HStack {
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(step.title).font(.headline).singleLineTightTail()
-                Text(detailText(for: step)).font(.subheadline).foregroundStyle(.secondary).singleLineTightTail(minScale: 0.9)
+                Text(detailText(for: step))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .singleLineTightTail(minScale: 0.9)
             }
-            Spacer()
+            Spacer(minLength: 8)
             Image(systemName: step.isEnabled ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundStyle(step.isEnabled ? Color.accentColor : Color.secondary)
         }
+        .padding(.vertical, 2)
     }
     private func detailText(for: Step) -> String {
         let step = `for`
@@ -152,7 +180,6 @@ struct ContentView: View {
     @EnvironmentObject private var router: ModalRouter
     @Query(sort: \Stack.createdAt, order: .reverse) private var stacks: [Stack]
 
-    @State private var busyStacks: Set<UUID> = []
     @StateObject private var store = Store.shared
     @Namespace private var sheetNS
 
@@ -161,6 +188,10 @@ struct ContentView: View {
     @AppStorage("appearanceMode") private var mode: String = AppearanceMode.system.rawValue
     @AppStorage("themeName")      private var themeName: String = "Default"
     private var appearanceID: String { "\(mode)-\(systemScheme == .dark ? "dark" : "light")-\(themeName)" }
+
+    @State private var renamingStack: Stack?
+    @State private var newName: String = ""
+    @State private var armingError: String?
 
     private enum BulkState { case none, some, all }
     private var bulkState: BulkState {
@@ -198,7 +229,11 @@ struct ContentView: View {
                         Toggle(
                             isOn: Binding(
                                 get: { bulkState == .all && !stacks.isEmpty },
-                                set: { on in if on { armAll() } else { disarmAll() } }
+                                set: { on in
+                                    Task { @MainActor in
+                                        if on { await armAll() } else { await disarmAll() }
+                                    }
+                                }
                             )
                         ) {
                             HStack(spacing: 8) {
@@ -215,27 +250,20 @@ struct ContentView: View {
                     .listRowBackground(Color.clear)
 
                     ForEach(stacks) { stack in
-                        NavigationLink(value: stack) {
-                            StackCard(color: stackAccent(for: stack)) {
-                                StackRow(stack: stack)
-                            }
-                            .contentShape(Rectangle())
-                        }
+                        StackRowCard(
+                            stack: stack,
+                            onToggleArm: { Task { await toggleArm(forID: stack.id) } },
+                            onDuplicate: { duplicate(stack: stack) },
+                            onRename: { beginRename(stack) },
+                            onDelete: { delete(stack: stack) },
+                            canArm: canArm(stack:)
+                        )
                         .listRowInsets(EdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12))
                         .listRowBackground(Color.clear)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) { delete(stack: stack) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
-                        }
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            Button {
-                                withGate(for: stack) { await toggleArm(for: stack) }
-                            } label: {
-                                Label(stack.isArmed ? "Disarm" : "Arm",
-                                      systemImage: stack.isArmed ? "bell.slash.fill" : "bell.fill")
-                            }
-                            .tint(stack.isArmed ? .orange : .green)
                         }
                     }
 
@@ -255,16 +283,13 @@ struct ContentView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .scrollClipDisabled()
             .themedSurface()
             .scrollDismissesKeyboard(.interactively)
             .dismissKeyboardOnTapAnywhere()
             .navigationTitle("Alarm Stacks")
             .navigationBarTitleDisplayMode(.large)
-            // Bottom-centre version badge (root list only)
-            .safeAreaInset(edge: .bottom) {
-                VersionBadge()
-                    .allowsHitTesting(false)
-            }
+            .safeAreaInset(edge: .bottom) { VersionBadge().allowsHitTesting(false) }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { router.showSettings() } label: {
@@ -290,6 +315,14 @@ struct ContentView: View {
             .navigationDestination(for: Step.self) { step in
                 StepEditorView(step: step)
             }
+            .alert("Couldn’t arm this stack", isPresented: Binding(
+                get: { armingError != nil },
+                set: { if !$0 { armingError = nil } }
+            )) {
+                Button("OK", role: .cancel) { armingError = nil }
+            } message: {
+                Text(armingError ?? "")
+            }
         }
         .background(ThemeSurfaceBackground())
         .task { await store.load() }
@@ -299,63 +332,168 @@ struct ContentView: View {
                 Task { await LiveActivityManager.resyncThemeForActiveActivities() }
             }
         }
+        .sheet(item: $renamingStack) { s in
+            NavigationStack {
+                Form {
+                    TextField("Name", text: $newName)
+                        .singleLineTightTail()
+                }
+                .navigationTitle("Rename Stack")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { renamingStack = nil }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            s.name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            try? modelContext.save()
+                            renamingStack = nil
+                        }
+                        .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+            .preferredAppearanceSheet()
+        }
+    }
+
+    // MARK: - Preflight
+
+    @MainActor
+    private func canArm(stack: Stack) -> Bool {
+        if let first = stack.sortedSteps.first, first.kind == .relativeToPrev { return false }
+        return nextStart(for: stack) != nil
+    }
+
+    @MainActor
+    private func nextStart(for stack: Stack) -> Date? {
+        let base = Date()
+        for step in stack.sortedSteps where step.isEnabled {
+            switch step.kind {
+            case .fixedTime, .timer, .relativeToPrev:
+                if let d = try? step.nextFireDate(basedOn: base, calendar: .current) { return d }
+                else { return nil }
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Helper
+
+    @MainActor
+    private func liveStack(by id: UUID) -> Stack? {
+        let fd = FetchDescriptor<Stack>(predicate: #Predicate { $0.id == id })
+        return try? modelContext.fetch(fd).first
     }
 
     // MARK: - Actions
 
-    private func armAll() {
-        Task { @MainActor in
-            for s in stacks where !s.isArmed {
-                guard !busyStacks.contains(s.id) else { continue }
-                busyStacks.insert(s.id)
-                defer { busyStacks.remove(s.id) }
-
-                if (try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)) != nil {
-                    s.isArmed = true
-                }
+    @MainActor
+    private func armAll() async {
+        for s in stacks where !s.isArmed {
+            guard canArm(stack: s) else {
+                armingError = "“\(s.name)” needs a valid starting step (e.g. a fixed time)."
+                continue
             }
+            s.isArmed = true
             try? modelContext.save()
-        }
-    }
 
-    private func disarmAll() {
-        Task { @MainActor in
-            for s in stacks where s.isArmed {
-                guard !busyStacks.contains(s.id) else { continue }
-                busyStacks.insert(s.id)
-                defer { busyStacks.remove(s.id) }
-
-                await AlarmScheduler.shared.cancelAll(for: s)
+            await AlarmScheduler.shared.cancelAll(for: s)
+            let ok = (try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)) != nil
+            if !ok {
                 s.isArmed = false
+                try? modelContext.save()
+                armingError = "Couldn’t arm “\(s.name)”."
             }
-            try? modelContext.save()
         }
     }
 
-    private func toggleArm(for stack: Stack) async {
-        if stack.isArmed {
-            await AlarmScheduler.shared.cancelAll(for: stack)
-            stack.isArmed = false
+    @MainActor
+    private func disarmAll() async {
+        for s in stacks where s.isArmed {
+            s.isArmed = false
+            try? modelContext.save()
+            await AlarmScheduler.shared.cancelAll(for: s)
+        }
+    }
+
+    @MainActor
+    private func toggleArm(forID id: UUID) async {
+        guard let s = liveStack(by: id) else { return }
+
+        if s.isArmed {
+            s.isArmed = false
+            try? modelContext.save()
+            await AlarmScheduler.shared.cancelAll(for: s)
         } else {
-            if (try? await AlarmScheduler.shared.schedule(stack: stack, calendar: .current)) != nil {
-                stack.isArmed = true
-            } else {
-                stack.isArmed = false
+            guard canArm(stack: s) else {
+                armingError = "This stack doesn’t have a start I can schedule. Add a fixed time for the first step."
+                return
+            }
+            s.isArmed = true
+            try? modelContext.save()
+
+            await AlarmScheduler.shared.cancelAll(for: s)
+            let ok = (try? await AlarmScheduler.shared.schedule(stack: s, calendar: .current)) != nil
+            if !ok {
+                s.isArmed = false
+                try? modelContext.save()
+                armingError = "Couldn’t arm “\(s.name)”."
             }
         }
-        try? modelContext.save()
     }
 
     private func delete(stack: Stack) {
         Task { @MainActor in
-            if !busyStacks.contains(stack.id) {
-                busyStacks.insert(stack.id)
-                defer { busyStacks.remove(stack.id) }   // ✅ fixed (was s.id)
-                await AlarmScheduler.shared.cancelAll(for: stack)
-            }
+            await AlarmScheduler.shared.cancelAll(for: stack)
             modelContext.delete(stack)
             try? modelContext.save()
         }
+    }
+
+    private func beginRename(_ s: Stack) {
+        renamingStack = s
+        newName = s.name
+    }
+
+    private func duplicate(stack: Stack) {
+        var baseName = stack.name.isEmpty ? "Stack" : stack.name
+        if baseName.lowercased().hasSuffix(" copy") == false {
+            baseName += " copy"
+        }
+        var name = baseName
+        var counter = 2
+        while stacks.contains(where: { $0.name == name }) {
+            name = "\(baseName) \(counter)"
+            counter += 1
+        }
+
+        let newStack = Stack(name: name)
+        newStack.isArmed = false
+
+        let now = Date()
+        for (idx, src) in stack.sortedSteps.enumerated() {
+            let step = Step(
+                title: src.title,
+                kind: src.kind,
+                order: idx,
+                createdAt: now,
+                hour: src.hour,
+                minute: src.minute,
+                allowSnooze: src.allowSnooze,
+                snoozeMinutes: src.snoozeMinutes,
+                stack: newStack
+            )
+            step.durationSeconds = src.durationSeconds
+            step.offsetSeconds = src.offsetSeconds
+            step.weekday = src.weekday
+            step.weekdays = src.weekdays
+            step.everyNDays = src.everyNDays
+            step.isEnabled = src.isEnabled
+        }
+
+        modelContext.insert(newStack)
+        try? modelContext.save()
     }
 
     private func addSampleStacksCapped() {
@@ -395,67 +533,122 @@ struct ContentView: View {
         ]
         return s
     }
-
-    // MARK: - Simple per-stack gate
-
-    private func withGate(for stack: Stack, _ work: @escaping () async -> Void) {
-        guard !busyStacks.contains(stack.id) else { return }
-        busyStacks.insert(stack.id)
-        Task { @MainActor in
-            defer { busyStacks.remove(stack.id) }
-            await work()
-        }
-    }
 }
 
-// MARK: - Row (main list)
+// MARK: - Row card
 
-private struct StackRow: View {
+private struct StackRowCard: View {
     @Bindable var stack: Stack
+    var onToggleArm: () -> Void
+    var onDuplicate: () -> Void
+    var onRename: () -> Void
+    var onDelete: () -> Void
+    var canArm: (Stack) -> Bool
     @Environment(\.calendar) private var calendar
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Text(stack.name)
-                    .font(.headline)
-                    .layoutPriority(1)
-                    .singleLineTightTail()
+        StackCard(color: stackAccent(for: stack)) {
+            HStack(alignment: .top, spacing: 12) {
+                // LEFT: Navigation link (title + meta + chips)
+                NavigationLink(value: stack) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        // Title row
+                        HStack(spacing: 8) {
+                            Text(stack.name)
+                                .font(.headline)
+                                .layoutPriority(1)
+                                .singleLineTightTail()
 
-                if stack.isArmed {
-                    Image(systemName: "bell.and.waves.left.and.right.fill")
-                        .imageScale(.small)
-                        .foregroundStyle(.tint)
-                }
-
-                Spacer()
-
-                Text("\(stack.sortedSteps.count) step\(stack.sortedSteps.count == 1 ? "" : "s")")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .singleLineTightTail()
-            }
-
-            if let next = nextStart(for: stack) {
-                Text("Next: \(formatted(next))")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .singleLineTightTail()
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(stack.sortedSteps) { step in
-                        NavigationLink(value: step) {
-                            StepChip(step: step)
+                            if stack.isArmed {
+                                Image(systemName: "bell.and.waves.left.and.right.fill")
+                                    .imageScale(.small)
+                                    .foregroundStyle(Color.accentColor)
+                                    .accessibilityHidden(true)
+                            }
                         }
-                        .buttonStyle(.plain)
+
+                        // Meta row
+                        HStack(spacing: 10) {
+                            Text("\(stack.sortedSteps.count) step\(stack.sortedSteps.count == 1 ? "" : "s")")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .singleLineTightTail()
+
+                            if let next = nextStart(for: stack) {
+                                Text("·")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Text("Next \(formatted(next))")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .singleLineTightTail()
+                                    .accessibilityLabel("Next at \(formatted(next))")
+                            } else if !canArm(stack) {
+                                Label("Needs a start time", systemImage: "exclamationmark.triangle.fill")
+                                    .font(.footnote)
+                                    .foregroundStyle(.orange)
+                                    .singleLineTightTail()
+                            }
+                        }
+
+                        // Chips row — padded so it never looks “shaved” by the mask
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(stack.sortedSteps) { step in
+                                    NavigationLink(value: step) {
+                                        StepChip(step: step)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.vertical, 8)     // ↑ give chips vertical breathing room
+                            .padding(.horizontal, 4)   // ↑ small side gutters
+                        }
+                        .scrollClipDisabled()
+                        .contentMargins(.horizontal, 4, for: .scrollContent)
+                        .contentMargins(.vertical, 0, for: .scrollContent)
+                        .frame(minHeight: 36)
                     }
                 }
-                .padding(.vertical, 2)
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 8)
+
+                // RIGHT: top-rail with Duplicate (left) then Arm (right)
+                VStack(alignment: .trailing, spacing: 0) {
+                    HStack(spacing: 12) {
+                        Button(action: onDuplicate) {
+                            Image(systemName: "square.on.square")
+                                .imageScale(.large)
+                                .accessibilityLabel("Duplicate stack")
+                        }
+                        .buttonStyle(.borderless)
+
+                        Button(action: onToggleArm) {
+                            Image(systemName: stack.isArmed ? "power.circle.fill" : "power.circle")
+                                .imageScale(.large)
+                                .symbolVariant(canArm(stack) ? .none : .slash)
+                                .accessibilityLabel(stack.isArmed ? "Disarm" : "Arm")
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(!canArm(stack))
+                    }
+                    .padding(.top, 2)
+
+                    Spacer(minLength: 0)
+                }
+                .frame(minHeight: 44, alignment: .top)
             }
+            .padding(.vertical, 2)
         }
-        .padding(.vertical, 6)
+        .contextMenu {
+            Button(stack.isArmed ? "Disarm" : "Arm", action: onToggleArm)
+            Button("Duplicate", action: onDuplicate)
+            Button("Rename", action: onRename)
+            Divider()
+            Button("Delete", role: .destructive, action: onDelete)
+        }
     }
 
     private func nextStart(for stack: Stack) -> Date? {
@@ -478,73 +671,7 @@ private struct StackRow: View {
     }
 }
 
-private struct StepChip: View {
-    let step: Step
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon(for: step)).imageScale(.small)
-            Text(label(for: step))
-                .font(.caption)
-                .layoutPriority(1)
-                .singleLineTightTail(minScale: 0.85)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.thinMaterial, in: Capsule())
-    }
-
-    private func icon(for step: Step) -> String {
-        switch step.kind {
-        case .fixedTime: return "alarm"
-        case .timer: return "timer"
-        case .relativeToPrev: return "plus.circle"
-        }
-    }
-
-    private func label(for step: Step) -> String {
-        switch step.kind {
-        case .fixedTime:
-            var time = "Time"
-            if let h = step.hour, let m = step.minute { time = String(format: "%02d:%02d", h, m) }
-            let days = daysText(for: step)
-            return days.isEmpty ? "\(time)  \(step.title)" : "\(time) • \(days)  \(step.title)"
-        case .timer:
-            if let s = step.durationSeconds { return "\(format(seconds: s))  \(step.title)" }
-            return step.title
-        case .relativeToPrev:
-            if let s = step.offsetSeconds {
-                let sign = s >= 0 ? "+" : "−"
-                return "\(sign)\(format(seconds: abs(s)))  \(step.title)"
-            }
-            return step.title
-        }
-    }
-
-    private func format(seconds: Int) -> String {
-        let h = seconds / 3600, m = (seconds % 3600) / 60, s = seconds % 60
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m" }
-        return "\(s)s"
-    }
-
-    private func daysText(for step: Step) -> String {
-        let map = [2:"Mon",3:"Tue",4:"Wed",5:"Thu",6:"Fri",7:"Sat",1:"Sun"]
-        let chosen: [Int]
-        if let arr = step.weekdays, !arr.isEmpty { chosen = arr }
-        else if let one = step.weekday { chosen = [one] }
-        else { return "" }
-
-        let set = Set(chosen)
-        if set.count == 7 { return "Every day" }
-        if set == Set([2,3,4,5,6]) { return "Weekdays" }
-        if set == Set([1,7]) { return "Weekend" }
-        let order = [2,3,4,5,6,7,1]
-        return order.filter { set.contains($0) }.compactMap { map[$0] }.joined(separator: " ")
-    }
-}
-
-// MARK: - Cards, palette, background helpers
+// MARK: - Card shell (content masked to stay inside rounded rect)
 
 private struct StackCard<Content: View>: View {
     let color: Color
@@ -557,15 +684,25 @@ private struct StackCard<Content: View>: View {
     }
 
     var body: some View {
-        content
-            .padding(12)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(color.opacity(scheme == .dark ? 0.55 : 0.45), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.10), radius: 10, x: 0, y: 6)
-            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+
+        // Mask ONLY the content so nothing (chips included) can escape the edges.
+        ZStack {
+            content
+                .padding(12)
+                .mask(shape) // <- containment
+                .compositingGroup() // better edge antialiasing when masked
+        }
+        .background(.thinMaterial, in: shape)
+        .overlay(
+            shape.strokeBorder(color.opacity(scheme == .dark ? 0.65 : 0.55), lineWidth: 1)
+        )
+        .overlay(
+            shape.inset(by: 0.5)
+                .strokeBorder(.white.opacity(scheme == .dark ? 0.08 : 0.20), lineWidth: 0.75)
+        )
+        .shadow(color: .black.opacity(scheme == .dark ? 0.20 : 0.10), radius: 10, x: 0, y: 6)
+        .contentShape(shape)
     }
 }
 
@@ -623,7 +760,6 @@ private struct VersionBadge: View {
             Text(localVersionString)
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
-                // Engraved effect: reversed bevel inside the glyphs
                 .overlay(
                     Text(localVersionString)
                         .font(.footnote.weight(.semibold))

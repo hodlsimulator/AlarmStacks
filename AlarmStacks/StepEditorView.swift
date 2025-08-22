@@ -43,14 +43,12 @@ struct StepEditorView: View {
         .navigationTitle("Edit Step")
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Done") {
-                    Task { await saveAndReschedule() }
-                }
+                Button("Done") { Task { await saveAndReschedule() } }
             }
         }
         .scrollDismissesKeyboard(.interactively)
-        .dismissKeyboardOnTapAnywhere()      // ← tap anywhere to dismiss keyboard (doesn’t block taps)
-        .themedSurface()                     // ← pushed via navigation, not a sheet
+        .dismissKeyboardOnTapAnywhere()
+        .themedSurface()
     }
 
     // MARK: - Sections
@@ -67,8 +65,8 @@ struct StepEditorView: View {
 
     private var kindSection: some View {
         Section("Step type") {
-            // No "Timer" option for new or non-timer steps.
-            // If the step is a legacy Timer, show a read-only label instead of a picker.
+            let isFirst = (step.stack?.sortedSteps.first?.id == step.id)
+
             if step.kind == .timer {
                 LabeledContent("Type") {
                     Text("Timer (legacy)")
@@ -76,11 +74,30 @@ struct StepEditorView: View {
                         .singleLineTightTail()
                 }
             } else {
-                Picker("Type", selection: $step.kind) {
+                Picker("Type", selection: Binding<StepKind>(
+                    get: { step.kind },
+                    set: { newValue in
+                        // If user tries to set first step to After Previous, snap back to Fixed
+                        if isFirst && newValue == .relativeToPrev {
+                            step.kind = .fixedTime
+                        } else {
+                            step.kind = newValue
+                        }
+                    }
+                )) {
                     Text("Fixed time").tag(StepKind.fixedTime)
-                    Text("After previous").tag(StepKind.relativeToPrev)
+                    Text("After previous")
+                        .tag(StepKind.relativeToPrev)
+                        .disabled(isFirst)
                 }
                 .pickerStyle(.segmented)
+
+                if isFirst {
+                    Text("The first step needs a start time. Use **Fixed time**; later steps can be **After previous**.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -136,9 +153,7 @@ struct StepEditorView: View {
         Section("Every N days (optional)") {
             Toggle(isOn: Binding<Bool>(
                 get: { (step.everyNDays ?? 0) > 1 },
-                set: { on in
-                    step.everyNDays = on ? max(2, step.everyNDays ?? 2) : nil
-                }
+                set: { on in step.everyNDays = on ? max(2, step.everyNDays ?? 2) : nil }
             )) {
                 Text("Gate timer to a day cadence").singleLineTightTail()
             }
@@ -191,7 +206,6 @@ struct StepEditorView: View {
     private var behaviourSection: some View {
         Section("Behaviour") {
             Toggle("Allow snooze", isOn: $step.allowSnooze)
-
             Stepper(value: $step.snoozeMinutes, in: 1...30) {
                 if step.snoozeMinutes == 1 {
                     Text("Snooze for 1 minute").singleLineTightTail()
@@ -344,6 +358,7 @@ private struct WeekdayChips: View {
                 }
                 .padding(.vertical, 2)
             }
+            .scrollClipDisabled()
 
             HStack(spacing: 12) {
                 Button("Clear") { selected.removeAll() }
