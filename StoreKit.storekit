@@ -15,7 +15,7 @@
   ],
   "products" : [
     {
-      "displayPrice" : "16.99",
+      "displayPrice" : "17.99",
       "familyShareable" : false,
       "internalID" : "DB21A0D8",
       "localizations" : [
@@ -59,7 +59,7 @@
           "codeOffers" : [
 
           ],
-          "displayPrice" : "1.49",
+          "displayPrice" : "1.99",
           "familyShareable" : false,
           "groupNumber" : 1,
           "internalID" : "98586929",

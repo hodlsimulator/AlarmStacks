@@ -553,6 +553,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacks/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Alarm Stacks";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSSiriUsageDescription = "AlarmStacks uses Siri so you can start, stop, or snooze your alarm stacks with your voice. Your request may be sent to Apple to process the command.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
@@ -591,6 +592,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacks/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Alarm Stacks";
 				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSSiriUsageDescription = "AlarmStacks uses Siri so you can start, stop, or snooze your alarm stacks with your voice. Your request may be sent to Apple to process the command.";
 				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
@@ -713,6 +715,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacksWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AlarmStacksWidget;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -744,6 +747,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = AlarmStacksWidget/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AlarmStacksWidget;
+				INFOPLIST_KEY_LSApplicationCategoryType = "";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
