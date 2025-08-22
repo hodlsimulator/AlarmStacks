@@ -2,8 +2,6 @@
 //  ThemeSync.swift
 //  AlarmStacks
 //
-//  Created by . . on 8/19/25.
-//
 
 import SwiftUI
 
@@ -15,7 +13,7 @@ struct ThemeSync: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onAppear(perform: write)
-            // iOS 17+: use the two-parameter onChange closure to silence deprecation.
+            // iOS 17+: two-parameter variant to silence deprecation.
             .onChange(of: themeName) { _, _ in
                 write()
             }
@@ -27,7 +25,8 @@ struct ThemeSync: ViewModifier {
             d?.set(themeName, forKey: "themeName")
         }
         // Ensure any existing Live Activities re-tint immediately.
-        Task { await LiveActivityManager.resyncThemeForActiveActivities() }
+        // NOTE: This is a synchronous API — do NOT await it.
+        Task { LiveActivityManager.resyncThemeForActiveActivities() }
     }
 }
 

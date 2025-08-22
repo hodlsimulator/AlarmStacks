@@ -82,6 +82,7 @@
 			membershipExceptions = (
 				AlarmControlIntents.swift,
 				AppGroups.swift,
+				LiveActivityTypes.swift,
 				NextAlarmBridge.swift,
 				ThemePayload.swift,
 				"View+SingleLineTightTail.swift",

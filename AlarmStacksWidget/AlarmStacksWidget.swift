@@ -68,11 +68,7 @@ private struct Card<Content: View>: View {
 private struct ContainerBG: ViewModifier {
     let color: Color
     func body(content: Content) -> some View {
-        if #available(iOSApplicationExtension 17.0, *) {
-            content.containerBackground(color, for: .widget)
-        } else {
-            content.background(color)
-        }
+        content.containerBackground(color, for: .widget)
     }
 }
 
@@ -155,10 +151,65 @@ struct NextAlarmWidget: Widget {
     }
 }
 
+#if canImport(ActivityKit)
+// MARK: - LA view logger (writes to App Group so the app can read it)
+
+private enum LAViewLogger {
+    private static let logKey = "diag.log.lines"
+
+    private static let fmt: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .iso8601)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"
+        return f
+    }()
+
+    private static func append(_ line: String) {
+        let now = Date()
+        let up  = ProcessInfo.processInfo.systemUptime
+        let stamp = "\(fmt.string(from: now)) | up:\(String(format: "%.3f", up))s"
+        let full = "[\(stamp)] \(line)"
+        let ud = UserDefaults(suiteName: AppGroups.main)
+        var lines = ud?.stringArray(forKey: logKey) ?? []
+        lines.append(full)
+        if lines.count > 2000 {
+            lines.removeFirst(lines.count - 2000)
+        }
+        ud?.set(lines, forKey: logKey)
+    }
+
+    /// Throttled log of exactly what the LA is showing.
+    static func logRender(surface: String, state: AlarmActivityAttributes.ContentState) {
+        let now = Date()
+        let isRinging = (state.firedAt != nil) // ← status is based ONLY on firedAt
+        let mode: String
+        var bucket = 0
+        if let fired = state.firedAt {
+            mode = "clock(firedAt=\(fmt.string(from: fired)))"
+        } else if state.ends > now {
+            let remain = Int(round(state.ends.timeIntervalSince(now)))
+            bucket = max(0, remain / 30) // 30s buckets
+            mode = "timer(remaining=\(remain)s)"
+        } else {
+            mode = "time(ends=\(fmt.string(from: state.ends)))"
+        }
+
+        // Throttle by alarmID + surface + status + bucket.
+        let sig = "\(state.alarmID)|\(surface)|\(isRinging ? "R" : "N")|\(mode)|\(bucket)"
+        let sigKey = "la.lastsig.\(state.alarmID).\(surface)"
+        let ud = UserDefaults(suiteName: AppGroups.main)
+        let last = ud?.string(forKey: sigKey)
+        if last == sig { return }
+        ud?.set(sig, forKey: sigKey)
+
+        append("[LA] render surface=\(surface) stack=\(state.stackName) step=\(state.stepTitle) status=\(isRinging ? "Ringing" : "Next") mode=\(mode) ends=\(fmt.string(from: state.ends)) now=\(fmt.string(from: now)) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
+    }
+}
+
 // MARK: - Live Activity (no Stop/Snooze actions on bubble)
 
-#if canImport(ActivityKit)
-@available(iOSApplicationExtension 16.1, *)
 private struct AlarmActivityLockRoot: View {
     let context: ActivityViewContext<AlarmActivityAttributes>
     @Environment(\.colorScheme) private var scheme
@@ -178,6 +229,9 @@ private struct AlarmActivityLockRoot: View {
         #endif
     }
 
+    /// “Ringing” is ONLY when the engine has set `firedAt`.
+    private var isRinging: Bool { context.state.firedAt != nil }
+
     var body: some View {
         VStack(spacing: 12) {
             // Row: Glyph + titles + right-rail timer
@@ -185,7 +239,7 @@ private struct AlarmActivityLockRoot: View {
                 GlassGlyph(accent: accent)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    StatusChip(text: (context.state.firedAt != nil) ? "Ringing" : "Next step")
+                    StatusChip(text: isRinging ? "Ringing" : "Next step")
                     Text(context.state.stackName)
                         .font(.title3.weight(.semibold))
                         .fontDesign(.rounded)
@@ -221,11 +275,16 @@ private struct AlarmActivityLockRoot: View {
         .activityBackgroundTint(glassTint)         // super transparent glass
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
+        .onAppear {
+            LAViewLogger.logRender(surface: "lock", state: context.state)
+        }
+        .onChange(of: context.state) { _, newState in
+            LAViewLogger.logRender(surface: "lock", state: newState)
+        }
     }
 }
 
 // Accent glyph with subtle glass ring (stroke-only, no opaque fill).
-@available(iOSApplicationExtension 16.1, *)
 private struct GlassGlyph: View {
     let accent: Color
     var body: some View {
@@ -246,7 +305,6 @@ private struct GlassGlyph: View {
 }
 
 // Small glassy status capsule (“Ringing” / “Next step”), stroke only.
-@available(iOSApplicationExtension 16.1, *)
 private struct StatusChip: View {
     let text: String
     var body: some View {
@@ -266,30 +324,25 @@ private struct StatusChip: View {
             .singleLineTightTail()
     }
 }
-#endif
 
 // MARK: - Activity + Island
 
-@available(iOSApplicationExtension 16.1, *)
 struct AlarmActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
-            #if canImport(ActivityKit)
             AlarmActivityLockRoot(context: context)
-            #else
-            EmptyView()
-            #endif
         } dynamicIsland: { context in
-            #if canImport(ActivityKit)
             let accent = context.state.theme.accent.color
+            let isRinging = (context.state.firedAt != nil) // ← same rule
 
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     GlassGlyph(accent: accent)
+                        .onAppear { LAViewLogger.logRender(surface: "island.expanded", state: context.state) }
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        StatusChip(text: (context.state.firedAt != nil) ? "Ringing" : "Next step")
+                        StatusChip(text: isRinging ? "Ringing" : "Next step")
                         Text(context.state.stackName)
                             .font(.headline.weight(.semibold))
                             .fontDesign(.rounded)
@@ -299,6 +352,10 @@ struct AlarmActivityWidget: Widget {
                             .fontDesign(.rounded)
                             .foregroundStyle(.secondary)
                             .singleLineTightTail()
+                    }
+                    .onAppear { LAViewLogger.logRender(surface: "island.expanded", state: context.state) }
+                    .onChange(of: context.state) { _, newState in
+                        LAViewLogger.logRender(surface: "island.expanded", state: newState)
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -325,6 +382,7 @@ struct AlarmActivityWidget: Widget {
                 }
             } compactLeading: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
+                    .onAppear { LAViewLogger.logRender(surface: "island.compactLeading", state: context.state) }
             } compactTrailing: {
                 Group {
                     if let fired = context.state.firedAt {
@@ -338,23 +396,26 @@ struct AlarmActivityWidget: Widget {
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
                 .multilineTextAlignment(.trailing)
+                .onAppear { LAViewLogger.logRender(surface: "island.compactTrailing", state: context.state) }
+                .onChange(of: context.state) { _, newState in
+                    LAViewLogger.logRender(surface: "island.compactTrailing", state: newState)
+                }
             } minimal: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
+                    .onAppear { LAViewLogger.logRender(surface: "island.minimal", state: context.state) }
             }
             .keylineTint(accent)
-            #else
-            DynamicIsland {}
-            #endif
         }
     }
 }
+#endif
 
 @main
 struct AlarmStacksWidgetBundle: WidgetBundle {
     var body: some Widget {
         NextAlarmWidget()
-        if #available(iOSApplicationExtension 16.1, *) {
-            AlarmActivityWidget()
-        }
+        #if canImport(ActivityKit)
+        AlarmActivityWidget()
+        #endif
     }
 }

@@ -104,24 +104,74 @@ private func colorFromHex(_ hex: String) -> Color {
     }
 }
 
+// MARK: - Unified defaults shim (reads from Group + Standard; writes to both)
+
+private enum UD {
+    static let group = UserDefaults(suiteName: "group.com.hodlsimulator.alarmstacks")
+
+    // Reads
+    static func rString(_ key: String) -> String? {
+        if let v = group?.string(forKey: key) { return v }
+        return UserDefaults.standard.string(forKey: key)
+    }
+    static func rStringArray(_ key: String) -> [String] {
+        if let v = group?.stringArray(forKey: key) { return v }
+        return UserDefaults.standard.stringArray(forKey: key) ?? []
+    }
+    static func rDouble(_ key: String) -> Double {
+        if let v = group?.object(forKey: key) as? Double { return v }
+        return (UserDefaults.standard.object(forKey: key) as? Double) ?? 0
+    }
+    static func rInt(_ key: String, default def: Int = 0) -> Int {
+        if let v = group?.object(forKey: key) as? Int { return v }
+        if let v = UserDefaults.standard.object(forKey: key) as? Int { return v }
+        return def
+    }
+    static func rBool(_ key: String, default def: Bool = false) -> Bool {
+        if let v = group?.object(forKey: key) as? Bool { return v }
+        if let v = UserDefaults.standard.object(forKey: key) as? Bool { return v }
+        return def
+    }
+
+    // Writes (mirror to both to avoid domain skew)
+    static func set(_ value: Any?, forKey key: String) {
+        if let value = value {
+            group?.set(value, forKey: key)
+            UserDefaults.standard.set(value, forKey: key)
+        } else {
+            remove(key)
+        }
+    }
+    static func remove(_ key: String) {
+        group?.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
+
+// Don’t surface LA if the nearest step is too far away (prevents “in 23h” flashes)
+private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2 hours
+
 // MARK: - Minimal LA refresh (local, avoids depending on LiveActivityManager type)
 
 @MainActor
-private func refreshActivityFromAppGroup(stackID: String) async {
-    let ud = UserDefaults.standard
+private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = nil) async {
+    let ids: [String] = UD.rStringArray(storageKey(forStackID: stackID))
+    let now = Date()
 
-    let ids = ud.stringArray(forKey: storageKey(forStackID: stackID)) ?? []
-    if ids.isEmpty {
-        // End any running activity for this stack.
-        for a in Activity<AlarmActivityAttributes>.activities where a.attributes.stackID == stackID {
+    // Find existing activity for this stack (if any).
+    let existing = Activity<AlarmActivityAttributes>.activities
+        .first(where: { $0.attributes.stackID == stackID })
+
+    guard ids.isEmpty == false else {
+        if let a = existing {
             let st = a.content.state
             await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+            MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
         }
         return
     }
 
-    let firstEpoch = ud.double(forKey: firstTargetKey(forStackID: stackID))
-    let now = Date()
+    let firstEpoch = UD.rDouble(firstTargetKey(forStackID: stackID))
 
     struct Candidate {
         var id: String
@@ -134,41 +184,55 @@ private func refreshActivityFromAppGroup(stackID: String) async {
     var best: Candidate?
 
     for s in ids {
+        if let excludeID, s == excludeID { continue }
         guard let uuid = UUID(uuidString: s) else { continue }
 
-        let stackName = ud.string(forKey: "ak.stackName.\(uuid.uuidString)") ?? "Alarm"
-        let stepTitle = ud.string(forKey: "ak.stepTitle.\(uuid.uuidString)") ?? "Step"
-        let allow     = (ud.object(forKey: allowSnoozeKey(for: uuid)) as? Bool) ?? false
+        let stackName = UD.rString(stackNameKey(for: uuid)) ?? "Alarm"
+        let stepTitle = UD.rString(stepTitleKey(for: uuid)) ?? "Step"
+        let allow     = UD.rBool(allowSnoozeKey(for: uuid), default: false)
 
-        let effEpoch = ud.double(forKey: effTargetKey(for: uuid))
-        let expEpoch = ud.double(forKey: expectedKey(for: uuid))
-        let off      = (ud.object(forKey: offsetFromFirstKey(for: uuid)) as? Double)
+        let effEpoch = UD.rDouble(effTargetKey(for: uuid))
+        let expEpoch = UD.rDouble(expectedKey(for: uuid))
+        let offAny   = (UD.group?.object(forKey: offsetFromFirstKey(for: uuid))
+                        ?? UserDefaults.standard.object(forKey: offsetFromFirstKey(for: uuid))) as? Double
 
         let date: Date? = {
             if effEpoch > 0 { return Date(timeIntervalSince1970: effEpoch) }
             if expEpoch > 0 { return Date(timeIntervalSince1970: expEpoch) }
-            if firstEpoch > 0, let off = off { return Date(timeIntervalSince1970: firstEpoch + off) }
+            if firstEpoch > 0, let off = offAny { return Date(timeIntervalSince1970: firstEpoch + off) }
             return nil
         }()
 
         guard let d = date else { continue }
-        if d < now.addingTimeInterval(-2) { continue }
+        if d < now.addingTimeInterval(-2) { continue } // in the past
 
         if let b = best {
-            if d < b.date { best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow) }
+            if d < b.date {
+                best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow)
+            }
         } else {
             best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow)
         }
     }
 
-    // Find existing activity for this stack (if any).
-    let existing = Activity<AlarmActivityAttributes>.activities.first(where: { $0.attributes.stackID == stackID })
-
     guard let chosen = best else {
-        // No future event — end activity (if any).
         if let a = existing {
             let st = a.content.state
             await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+            MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-future → end")
+        }
+        return
+    }
+
+    // Far-future guard: skip showing “tomorrow” until we have a near event.
+    let lead = chosen.date.timeIntervalSince(now)
+    if lead > LA_NEAR_WINDOW {
+        if let a = existing {
+            let st = a.content.state
+            await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+            MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+        } else {
+            MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
         }
         return
     }
@@ -176,6 +240,7 @@ private func refreshActivityFromAppGroup(stackID: String) async {
     // Reuse current theme if present, otherwise rely on default in ContentState init.
     let currentTheme = existing?.content.state.theme
 
+    // Always clear firedAt so we never stick in “ringing”.
     var newState = AlarmActivityAttributes.ContentState(
         stackName: chosen.stackName,
         stepTitle: chosen.stepTitle,
@@ -186,20 +251,30 @@ private func refreshActivityFromAppGroup(stackID: String) async {
     )
     if let theme = currentTheme { newState.theme = theme }
 
-    let content = ActivityContent(state: newState, staleDate: nil)
-
-    do {
-        if let a = existing {
-            await a.update(content)
-        } else {
+    // If nothing changed, skip to avoid churn.
+    if let a = existing {
+        let st = a.content.state
+        if st.stackName == newState.stackName &&
+            st.stepTitle == newState.stepTitle &&
+            st.ends == newState.ends &&
+            st.allowSnooze == newState.allowSnooze &&
+            st.firedAt == nil &&
+            st.alarmID == newState.alarmID {
+            return
+        }
+        await a.update(ActivityContent(state: newState, staleDate: nil))
+        MiniDiag.log("[ACT] refresh.update stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+    } else {
+        do {
             _ = try Activity.request(
                 attributes: AlarmActivityAttributes(stackID: stackID),
-                content: content,
+                content: ActivityContent(state: newState, staleDate: nil),
                 pushType: nil
             )
+            MiniDiag.log("[ACT] refresh.start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+        } catch {
+            MiniDiag.log("[ACT] refresh request failed stack=\(stackID) error=\(error)")
         }
-    } catch {
-        MiniDiag.log("[ACT] refresh request/update failed stack=\(stackID) error=\(error)")
     }
 }
 
@@ -223,15 +298,31 @@ struct StopAlarmIntent: AppIntent, LiveActivityIntent {
         try? AlarmManager.shared.stop(id: id)
         MiniDiag.log("AK STOP id=\(id.uuidString)")
 
-        // Refresh LA to the next pending step for THIS stack (don’t globally end).
-        if let stackID = UserDefaults.standard.string(forKey: stackIDKey(for: id)) {
-            await refreshActivityFromAppGroup(stackID: stackID)
+        // Resolve stackID from App Group, standard, or from the visible LA that shows this alarmID.
+        let resolvedStackID: String? = {
+            if let s = UD.rString(stackIDKey(for: id)) { return s }
+            if let a = Activity<AlarmActivityAttributes>.activities.first(where: { $0.content.state.alarmID == id.uuidString }) {
+                return a.attributes.stackID
+            }
+            if Activity<AlarmActivityAttributes>.activities.count == 1 {
+                return Activity<AlarmActivityAttributes>.activities.first?.attributes.stackID
+            }
+            return nil
+        }()
+
+        if let stackID = resolvedStackID {
+            MiniDiag.log("[ACT] stop.resolve stack=\(stackID)")
+            // Exclude the just-stopped id so we don't pick it again.
+            await refreshActivityFromAppGroup(stackID: stackID, excludeID: id.uuidString)
         } else {
             // Fallback: clear ringing flag on any visible activity.
+            MiniDiag.log("[ACT] stop.fallback (no stackID) cleared firedAt on visible activities")
             for activity in Activity<AlarmActivityAttributes>.activities {
                 var st = activity.content.state
-                st.firedAt = nil
-                await activity.update(ActivityContent(state: st, staleDate: nil))
+                if st.firedAt != nil {
+                    st.firedAt = nil
+                    await activity.update(ActivityContent(state: st, staleDate: nil))
+                }
             }
         }
 
@@ -267,35 +358,34 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         // Silence the current ring immediately.
         try? AlarmManager.shared.stop(id: baseID)
 
-        let ud = UserDefaults.standard
-
         // Gate by per-step allowSnooze (default FALSE)
-        let allow = (ud.object(forKey: allowSnoozeKey(for: baseID)) as? Bool) ?? false
+        let allow = UD.rBool(allowSnoozeKey(for: baseID), default: false)
         if allow == false {
             MiniDiag.log("SNOOZE IGNORED (disabled) id=\(baseID.uuidString)")
             return
         }
 
         // Read metadata from the base
-        let minutes   = max(1, ud.integer(forKey: snoozeMinutesKey(for: baseID)))
-        let stackName = ud.string(forKey: stackNameKey(for: baseID)) ?? "Alarm"
-        let stepTitle = ud.string(forKey: stepTitleKey(for: baseID)) ?? "Snoozed"
-        let carriedName = ud.string(forKey: soundKey(for: baseID))
-        let hex = ud.string(forKey: accentHexKey(for: baseID)) ?? ud.string(forKey: "themeAccentHex") ?? "#3A7BFF"
+        let minutes   = max(1, UD.rInt(snoozeMinutesKey(for: baseID), default: 1))
+        let stackName = UD.rString(stackNameKey(for: baseID)) ?? "Alarm"
+        let stepTitle = UD.rString(stepTitleKey(for: baseID)) ?? "Snoozed"
+        let carriedName = UD.rString(soundKey(for: baseID))
+        let hex = UD.rString(accentHexKey(for: baseID)) ?? UserDefaults.standard.string(forKey: "themeAccentHex") ?? "#3A7BFF"
         let tint = colorFromHex(hex)
 
         // Resolve stack mapping
-        guard let stackID = ud.string(forKey: stackIDKey(for: baseID)) else {
+        guard let stackID = UD.rString(stackIDKey(for: baseID)) else {
             MiniDiag.log("[CHAIN] snooze? base=\(baseID.uuidString) (no stackID)")
             return
         }
-        let firstEpoch = ud.double(forKey: firstTargetKey(forStackID: stackID))
+        let firstEpoch = UD.rDouble(firstTargetKey(forStackID: stackID))
         guard firstEpoch > 0 else {
             MiniDiag.log("[CHAIN] snooze? stack=\(stackID) (no first target)")
             return
         }
         let firstDate  = Date(timeIntervalSince1970: firstEpoch)
-        let baseOffset = (ud.object(forKey: offsetFromFirstKey(for: baseID)) as? Double) ?? 0
+        let baseOffset = ((UD.group?.object(forKey: offsetFromFirstKey(for: baseID))
+                           ?? UserDefaults.standard.object(forKey: offsetFromFirstKey(for: baseID))) as? Double) ?? 0
         let isFirst    = abs(baseOffset) < 0.5
 
         // Nominal old time for the base = first + offset
@@ -318,11 +408,11 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         let attrs = AlarmAttributes<IntentsMetadata>(presentation: AlarmPresentation(alert: alert), tintColor: tint)
 
         // Cancel any existing mapped snooze for this base
-        if let existing = ud.string(forKey: snoozeMapKey(for: baseID)),
+        if let existing = UD.rString(snoozeMapKey(for: baseID)),
            let existingID = UUID(uuidString: existing) {
             try? AlarmManager.shared.cancel(id: existingID)
             cleanupMetadata(for: existingID)
-            ud.removeObject(forKey: snoozeMapKey(for: baseID))
+            UD.remove(snoozeMapKey(for: baseID))
         }
 
         // Schedule the snooze timer
@@ -342,25 +432,25 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         }
 
         // Persist snooze metadata (effective target only)
-        ud.set(newBase.timeIntervalSince1970, forKey: effTargetKey(for: snoozeID))
-        ud.set(snoozeID.uuidString, forKey: snoozeMapKey(for: baseID))
-        ud.set(minutes,   forKey: snoozeMinutesKey(for: snoozeID))
-        ud.set(stackName, forKey: stackNameKey(for: snoozeID))
-        ud.set(stepTitle, forKey: stepTitleKey(for: snoozeID))
-        if let n = carriedName, !n.isEmpty { ud.set(n, forKey: soundKey(for: snoozeID)) }
-        ud.set(hex, forKey: accentHexKey(for: snoozeID))
-        ud.set(true, forKey: allowSnoozeKey(for: snoozeID)) // snooze alert always re-snoozable
+        UD.set(newBase.timeIntervalSince1970, forKey: effTargetKey(for: snoozeID))
+        UD.set(snoozeID.uuidString,          forKey: snoozeMapKey(for: baseID))
+        UD.set(minutes,                      forKey: snoozeMinutesKey(for: snoozeID))
+        UD.set(stackName,                    forKey: stackNameKey(for: snoozeID))
+        UD.set(stepTitle,                    forKey: stepTitleKey(for: snoozeID))
+        if let n = carriedName, !n.isEmpty { UD.set(n, forKey: soundKey(for: snoozeID)) }
+        UD.set(hex,                          forKey: accentHexKey(for: snoozeID))
+        UD.set(true,                         forKey: allowSnoozeKey(for: snoozeID)) // snooze alert always re-snoozable
 
         // Snooze mapping for offsets
         if isFirst {
-            ud.set(stackID, forKey: stackIDKey(for: snoozeID))
-            ud.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID)) // becomes the new base
-            ud.set("timer", forKey: kindKey(for: snoozeID))
+            UD.set(stackID, forKey: stackIDKey(for: snoozeID))
+            UD.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID)) // becomes the new base
+            UD.set("timer", forKey: kindKey(for: snoozeID))
         } else {
             let newOffset = baseOffset + delta
-            ud.set(stackID,   forKey: stackIDKey(for: snoozeID))
-            ud.set(newOffset, forKey: offsetFromFirstKey(for: snoozeID))
-            ud.set("timer",   forKey: kindKey(for: snoozeID))
+            UD.set(stackID,   forKey: stackIDKey(for: snoozeID))
+            UD.set(newOffset, forKey: offsetFromFirstKey(for: snoozeID))
+            UD.set("timer",   forKey: kindKey(for: snoozeID))
         }
 
         MiniDiag.log("AK snooze schedule base=\(baseID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(newBase) Δ=\(String(format: "%.3fs", delta)) baseOffset=\(String(format: "%.1fs", baseOffset)) isFirst=\(isFirst ? "y":"n")")
@@ -397,8 +487,7 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         baseOffset: TimeInterval,
         snoozeSecs: Int
     ) async {
-        let ud = UserDefaults.standard
-        var tracked = ud.stringArray(forKey: storageKey(forStackID: stackID)) ?? []
+        var tracked = UD.rStringArray(storageKey(forStackID: stackID))
 
         if tracked.isEmpty {
             MiniDiag.log("[CHAIN] no tracked IDs for stack=\(stackID); abort shift")
@@ -408,17 +497,17 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         // Replace base id with the new snooze id in the tracked list
         if let idx = tracked.firstIndex(of: baseID.uuidString) {
             tracked[idx] = snoozeID.uuidString
-            ud.set(tracked, forKey: storageKey(forStackID: stackID))
+            UD.set(tracked, forKey: storageKey(forStackID: stackID))
         } else {
             tracked.append(snoozeID.uuidString)
-            ud.set(tracked, forKey: storageKey(forStackID: stackID))
+            UD.set(tracked, forKey: storageKey(forStackID: stackID))
         }
 
         // Update anchor
         if baseIsFirst {
-            ud.set(newBase.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stackID))
+            UD.set(newBase.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stackID))
         } else {
-            ud.set(baseOffset + delta, forKey: offsetFromFirstKey(for: baseID))
+            UD.set(baseOffset + delta, forKey: offsetFromFirstKey(for: baseID))
         }
 
         MiniDiag.log(String(format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
@@ -429,25 +518,26 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
             guard let oldID = UUID(uuidString: oldStr) else { continue }
             if oldID == baseID || oldID == snoozeID { continue }
 
-            let kind = ud.string(forKey: kindKey(for: oldID)) ?? "timer"
+            let kind = UD.rString(kindKey(for: oldID)) ?? "timer"
             if kind == "fixed" {
                 MiniDiag.log("[CHAIN] skip fixed id=\(oldID.uuidString)")
                 continue
             }
 
-            guard let off = ud.object(forKey: offsetFromFirstKey(for: oldID)) as? Double else {
+            guard let off = (UD.group?.object(forKey: offsetFromFirstKey(for: oldID))
+                             ?? UserDefaults.standard.object(forKey: offsetFromFirstKey(for: oldID))) as? Double else {
                 MiniDiag.log("[CHAIN] skip id=\(oldID.uuidString) (no offset)")
                 continue
             }
             if baseIsFirst == false && off <= baseOffset { continue }
 
             // Carry metadata BEFORE cleanup (fallbacks if missing)
-            let stackName  = ud.string(forKey: stackNameKey(for: oldID)) ?? "Alarm"
-            let stepTitle  = ud.string(forKey: stepTitleKey(for: oldID)) ?? "Step"
-            let allow      = (ud.object(forKey: allowSnoozeKey(for: oldID)) as? Bool) ?? false
-            let snoozeMins = ud.integer(forKey: snoozeMinutesKey(for: oldID))
-            let carried    = ud.string(forKey: soundKey(for: oldID))
-            let hx = ud.string(forKey: accentHexKey(for: oldID)) ?? ud.string(forKey: "themeAccentHex") ?? "#3A7BFF"
+            let stackName  = UD.rString(stackNameKey(for: oldID)) ?? "Alarm"
+            let stepTitle  = UD.rString(stepTitleKey(for: oldID)) ?? "Step"
+            let allow      = UD.rBool(allowSnoozeKey(for: oldID), default: false)
+            let snoozeMins = UD.rInt(snoozeMinutesKey(for: oldID), default: 1)
+            let carried    = UD.rString(soundKey(for: oldID))
+            let hx = UD.rString(accentHexKey(for: oldID)) ?? UserDefaults.standard.string(forKey: "themeAccentHex") ?? "#3A7BFF"
 
             // New nominal & offset
             let newOffset  = baseIsFirst ? off : (off + delta)
@@ -502,22 +592,22 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
                 _ = try await AlarmManager.shared.schedule(id: newID, configuration: cfg)
 
                 // Persist new id metadata
-                ud.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID))
-                ud.set(stackName,  forKey: stackNameKey(for: newID))
-                ud.set(stepTitle,  forKey: stepTitleKey(for: newID))
-                ud.set(allow,      forKey: allowSnoozeKey(for: newID))
-                ud.set(snoozeMins, forKey: snoozeMinutesKey(for: newID))
-                if let n = carried, !n.isEmpty { ud.set(n, forKey: soundKey(for: newID)) }
-                ud.set(hx, forKey: accentHexKey(for: newID))
+                UD.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID))
+                UD.set(stackName,  forKey: stackNameKey(for: newID))
+                UD.set(stepTitle,  forKey: stepTitleKey(for: newID))
+                UD.set(allow,      forKey: allowSnoozeKey(for: newID))
+                UD.set(snoozeMins, forKey: snoozeMinutesKey(for: newID))
+                if let n = carried, !n.isEmpty { UD.set(n, forKey: soundKey(for: newID)) }
+                UD.set(hx, forKey: accentHexKey(for: newID))
 
                 // Preserve mapping
-                ud.set(stackID,   forKey: stackIDKey(for: newID))
-                ud.set(newOffset, forKey: offsetFromFirstKey(for: newID))
-                ud.set(kind,      forKey: kindKey(for: newID))
+                UD.set(stackID,   forKey: stackIDKey(for: newID))
+                UD.set(newOffset, forKey: offsetFromFirstKey(for: newID))
+                UD.set(kind,      forKey: kindKey(for: newID))
 
                 // Swap id in tracked list
                 if let i = tracked.firstIndex(of: oldStr) { tracked[i] = newID.uuidString }
-                ud.set(tracked, forKey: storageKey(forStackID: stackID))
+                UD.set(tracked, forKey: storageKey(forStackID: stackID))
 
                 MiniDiag.log("[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(String(format: "%.1fs", newOffset)) newTarget=\(newNominal) enforcedLead=\(enforcedStr) kind=\(kind) allowSnooze=\(allow)")
             } catch {
@@ -530,17 +620,16 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
 
     @MainActor
     private func cleanupMetadata(for id: UUID) {
-        let ud = UserDefaults.standard
-        ud.removeObject(forKey: expectedKey(for: id))
-        ud.removeObject(forKey: effTargetKey(for: id))
-        ud.removeObject(forKey: snoozeMinutesKey(for: id))
-        ud.removeObject(forKey: stackNameKey(for: id))
-        ud.removeObject(forKey: stepTitleKey(for: id))
-        ud.removeObject(forKey: soundKey(for: id))
-        ud.removeObject(forKey: accentHexKey(for: id))
-        ud.removeObject(forKey: stackIDKey(for: id))
-        ud.removeObject(forKey: offsetFromFirstKey(for: id))
-        ud.removeObject(forKey: kindKey(for: id))
-        ud.removeObject(forKey: allowSnoozeKey(for: id))
+        UD.remove(expectedKey(for: id))
+        UD.remove(effTargetKey(for: id))
+        UD.remove(snoozeMinutesKey(for: id))
+        UD.remove(stackNameKey(for: id))
+        UD.remove(stepTitleKey(for: id))
+        UD.remove(soundKey(for: id))
+        UD.remove(accentHexKey(for: id))
+        UD.remove(stackIDKey(for: id))
+        UD.remove(offsetFromFirstKey(for: id))
+        UD.remove(kindKey(for: id))
+        UD.remove(allowSnoozeKey(for: id))
     }
 }

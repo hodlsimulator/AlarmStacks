@@ -150,7 +150,7 @@ struct ContentView: View {
         .task { await store.load() }
         .syncThemeToAppGroup()
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase == .active { Task { await LiveActivityManager.resyncThemeForActiveActivities() } }
+            if newPhase == .active { Task { LiveActivityManager.resyncThemeForActiveActivities() } }
         }
         .sheet(item: $renamingStack) { s in
             NavigationStack {

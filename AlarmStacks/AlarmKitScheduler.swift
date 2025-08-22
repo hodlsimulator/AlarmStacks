@@ -150,15 +150,22 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         try await requestAuthorizationIfNeeded()
 
+        // If something is about to fire within the protected window, keep current schedules
+        // but make sure the Live Activity shows the *actual* pending target.
         if let imminent = nextEnabledStepFireDate(for: stack, calendar: calendar),
            imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
             DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
+            await LiveActivityManager.refreshFromAppGroup()
             return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
         if hasScheduledOnceAK == false {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
+
+        // ✅ Preflight Live Activity so it instantly shows the upcoming step
+        // (prevents a brief flash of an older “tomorrow” state before updates land).
+        await LiveActivityManager.start(for: stack, calendar: calendar)
 
         await cancelAll(for: stack)
 
@@ -286,7 +293,11 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         if firstRun { hasScheduledOnceAK = true }
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
 
+        // ✅ Confirm/update LA **after** scheduling so it picks up the near-term effective targets.
         await LiveActivityManager.start(for: stack, calendar: calendar)
+
+        // ✅ Keep the widget/LA theme in sync with the group defaults.
+        await LiveActivityManager.refreshFromAppGroup()
 
         // 🔔 SINGLE place to signal chain change to widget + logs
         ScheduleRevision.bump("chainShift")
@@ -472,3 +483,4 @@ private func makeAttributes(alert: AlarmPresentation.Alert, tint: SwiftUI.Color)
 }
 
 #endif
+    

@@ -116,7 +116,7 @@ struct StackRowCard: View {
             .disabled(!canArm(stack))
             .opacity(canArm(stack) ? 1.0 : 0.45)
         }
-        .contextMenu {
+        .safeContextMenu {
             Group {
                 if stack.isArmed {
                     Button(role: .none, action: onToggleArm) { Label("Disarm", systemImage: "bell.slash.fill") }

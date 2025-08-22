@@ -1,4 +1,3 @@
-//
 //  AlarmStacksApp.swift
 //  AlarmStacks
 //
@@ -25,7 +24,8 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         }
 
         if notification.request.content.categoryIdentifier == NotificationCategoryID.alarm {
-            Task { await LiveActivityManager.markFiredNow() }
+            // markFiredNow() is synchronous — don't await it.
+            Task { LiveActivityManager.markFiredNow() }
             return []
         }
 

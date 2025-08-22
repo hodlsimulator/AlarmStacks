@@ -57,7 +57,7 @@ enum AppEnv {
     }
 }
 
-// MARK: - Diagnostics logging (local time + monotonic uptime)
+// MARK: - Diagnostics logging (local time + monotonic uptime, merged with App Group)
 
 @MainActor
 enum DiagLog {
@@ -74,25 +74,52 @@ enum DiagLog {
         return f
     }()
 
+    private static var group: UserDefaults? { UserDefaults(suiteName: AppGroups.main) }
+
     /// Format a date in local time with offset.
     static func f(_ date: Date) -> String { local.string(from: date) }
 
     /// Append a line with a stable prelude: local timestamp + monotonic uptime.
+    /// Writes to BOTH the app container and the App Group so the widget/extension can read it too.
     static func log(_ message: String) {
         let now = Date()
         let up  = ProcessInfo.processInfo.systemUptime
         let stamp = "\(local.string(from: now)) | up:\(String(format: "%.3f", up))s"
         let line = "[\(stamp)] \(message)"
-        var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
-        lines.append(line)
-        if lines.count > maxLines {
-            lines.removeFirst(lines.count - maxLines)
+
+        // Standard
+        var a = UserDefaults.standard.stringArray(forKey: key) ?? []
+        a.append(line)
+        if a.count > maxLines { a.removeFirst(a.count - maxLines) }
+        UserDefaults.standard.set(a, forKey: key)
+
+        // App Group
+        if let g = group {
+            var b = g.stringArray(forKey: key) ?? []
+            b.append(line)
+            if b.count > maxLines { b.removeFirst(b.count - maxLines) }
+            g.set(b, forKey: key)
         }
-        UserDefaults.standard.set(lines, forKey: key)
     }
 
-    static func read() -> [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
+    /// Read a merged view of the standard + group logs, de-duplicated and time-sorted.
+    static func read() -> [String] {
+        let a = UserDefaults.standard.stringArray(forKey: key) ?? []
+        let b = group?.stringArray(forKey: key) ?? []
+        var set = Set<String>()
+        var merged = [String]()
+        for s in a + b {
+            if set.insert(s).inserted { merged.append(s) }
+        }
+        // Lexicographic sort works with our stable timestamp prefix.
+        merged.sort()
+        return merged
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+        group?.removeObject(forKey: key)
+    }
 
     /// UN summary (pending + delivered counts).
     static func auditUN() async {
@@ -392,4 +419,3 @@ struct DiagnosticsLogView: View {
         }
     }
 }
-    

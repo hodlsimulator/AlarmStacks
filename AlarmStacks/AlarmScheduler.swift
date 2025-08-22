@@ -1,4 +1,3 @@
-//
 //  AlarmScheduler.swift
 //  AlarmStacks
 //
@@ -72,6 +71,9 @@ final class UserNotificationScheduler: AlarmScheduling {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         _ = try? await requestAuthorizationIfNeeded()
 
+        // ⛔️ Removed preflight LA start — this was causing the “in 23 hours” flash.
+        // await LiveActivityManager.start(stack: stack, calendar: calendar)
+
         let center = UNUserNotificationCenter.current()
         await cancelAll(for: stack)
 
@@ -117,8 +119,8 @@ final class UserNotificationScheduler: AlarmScheduling {
             identifiers.append(id)
         }
 
-        // Update widget bridge + (optionally) start a Live Activity
-        await LiveActivityManager.start(for: stack, calendar: calendar)
+        // ✅ Start/update the Live Activity only after notifications are scheduled.
+        LiveActivityManager.start(stack: stack, calendar: calendar)
 
         return identifiers
     }

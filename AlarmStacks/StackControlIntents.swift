@@ -2,8 +2,6 @@
 //  StackControlIntents.swift
 //  AlarmStacks
 //
-//  Created by . . on 8/17/25.
-//
 
 import AppIntents
 import SwiftData
@@ -29,10 +27,13 @@ struct ArmStackIntent: AppIntent {
         let ctx = ModelContext(container)
         let all = try ctx.fetch(FetchDescriptor<Stack>())
         guard let target = all.first(where: { $0.id == stack.id }) else { return .result() }
+
         target.isArmed = true
         try? ctx.save()
+
         _ = try? await AlarmScheduler.shared.schedule(stack: target, calendar: .current)
         await LiveActivityManager.start(for: target, calendar: .current)
+
         return .result()
     }
 }
@@ -57,10 +58,13 @@ struct DisarmStackIntent: AppIntent {
         let ctx = ModelContext(container)
         let all = try ctx.fetch(FetchDescriptor<Stack>())
         guard let target = all.first(where: { $0.id == stack.id }) else { return .result() }
+
         target.isArmed = false
         try? ctx.save()
+
         await AlarmScheduler.shared.cancelAll(for: target)
-        await LiveActivityManager.end()
+        await LiveActivityManager.end(forStackID: target.id.uuidString)
+
         return .result()
     }
 }
@@ -84,8 +88,10 @@ struct CancelStackIntent: AppIntent {
         let ctx = ModelContext(container)
         let all = try ctx.fetch(FetchDescriptor<Stack>())
         guard let target = all.first(where: { $0.id == stack.id }) else { return .result() }
+
         await AlarmScheduler.shared.cancelAll(for: target)
-        await LiveActivityManager.end()
+        await LiveActivityManager.end(forStackID: target.id.uuidString)
+
         return .result()
     }
 }
