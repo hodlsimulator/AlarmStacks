@@ -7,90 +7,90 @@
 
 import SwiftUI
 
-/// Glass card with duo-stroke and elevation.
-/// Use for list cards, panels, and most containers.
-public struct GlassCardModifier: ViewModifier {
-    let radius: CGFloat
-    let level: ElevationLevel
-    let material: Material
+// MARK: - Liquid Glass (capsule) for compact controls
 
-    public init(radius: CGFloat = 18, level: ElevationLevel = .card, material: Material = .thin) {
-        self.radius = radius
-        self.level = level
-        self.material = material
-    }
+enum LiquidGlassVariant { case regular, clear }
 
-    public func body(content: Content) -> some View {
+private struct LiquidGlassCapsuleModifier: ViewModifier {
+    var variant: LiquidGlassVariant = .regular
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        let shape = Capsule(style: .continuous)
+        let base: AnyShapeStyle = (variant == .regular) ? AnyShapeStyle(.thinMaterial)
+                                                        : AnyShapeStyle(.ultraThinMaterial)
+
+        // Edge treatments
+        let depthStroke  = Color.primary.opacity(scheme == .dark ? 0.28 : 0.20)
+        let innerShine   = Color.white.opacity(scheme == .dark ? 0.10 : 0.22)
+        let specularTop  = Color.white.opacity(scheme == .dark ? 0.05 : 0.08)
+        let specularTail = Color.white.opacity(scheme == .dark ? 0.03 : 0.05)
+
         content
-            .padding(12)
-            .background(
-                RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(material)
-            )
-            .overlay(DuoStrokeOverlay(radius: radius))
-            .elevation(level)
-            .contentShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background {
+                shape.fill(base).allowsHitTesting(false)
+            }
+            .overlay {
+                shape.strokeBorder(depthStroke, lineWidth: 1).allowsHitTesting(false)
+            }
+            .overlay {
+                shape.inset(by: 0.5).strokeBorder(innerShine, lineWidth: 0.75).allowsHitTesting(false)
+            }
+            .overlay {
+                shape.fill(
+                    LinearGradient(
+                        colors: [specularTop, .clear, specularTail],
+                        startPoint: .topLeading, endPoint: .bottomTrailing
+                    )
+                )
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
+            }
+            .contentShape(shape)
     }
 }
 
-/// Capsule-chip variant used for step chips and small badges.
-public struct GlassChipModifier: ViewModifier {
-    public enum State { case normal, disabled, legacy }
-
-    let state: State
-    let material: Material
-
-    @Environment(\.colorScheme) private var scheme
-    @AppStorage("themeName") private var themeName: String = "Default"
-
-    public init(state: State = .normal, material: Material = .ultraThin) {
-        self.state = state
-        self.material = material
+extension View {
+    /// iOS 26-style Liquid Glass capsule for compact controls.
+    func liquidGlassCapsule(_ variant: LiquidGlassVariant = .regular) -> some View {
+        modifier(LiquidGlassCapsuleModifier(variant: variant))
     }
+}
 
-    public func body(content: Content) -> some View {
-        // Derive accent from your theme map (no Environment.tint read needed).
-        let accent = ThemeMap.accent(for: themeName)
+// MARK: - Glassy step chip (shared token)
 
-        let tintAlphaLight: CGFloat = (state == .disabled) ? 0.06 : (state == .legacy ? 0.14 : 0.12)
-        let tintAlphaDark:  CGFloat = (state == .disabled) ? 0.10 : (state == .legacy ? 0.18 : 0.18)
-        let bg = (scheme == .dark ? accent.opacity(tintAlphaDark) : accent.opacity(tintAlphaLight))
+struct GlassChipModifier: ViewModifier {
+    enum State { case normal, disabled, legacy }
+    let state: State
+    @Environment(\.colorScheme) private var scheme
 
-        return content
+    func body(content: Content) -> some View {
+        let shape = Capsule(style: .continuous)
+        let neutralStroke = Color.primary.opacity(scheme == .dark ? 0.25 : 0.18)
+        let legacyStroke  = Color.orange.opacity(scheme == .dark ? 0.55 : 0.45)
+        let strokeColor   = (state == .legacy) ? legacyStroke : neutralStroke
+        let innerShine    = Color.white.opacity(scheme == .dark ? 0.08 : 0.20)
+        let opacity: CGFloat = (state == .disabled) ? 0.55 : 1.0
+
+        content
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(
-                Capsule(style: .continuous)
-                    .fill(material)
-                    .background(Capsule(style: .continuous).fill(bg))
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(Color.white.opacity(scheme == .dark ? 0.26 : 0.20), lineWidth: 1)
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [Color.white.opacity(scheme == .dark ? 0.45 : 0.35),
-                                     Color.white.opacity(scheme == .dark ? 0.12 : 0.08)],
-                            startPoint: .top, endPoint: .bottom
-                        ),
-                        lineWidth: 1
-                    )
-                    .blendMode(.plusLighter)
-            )
-            .elevation(.chip)
-            .opacity(state == .disabled ? 0.85 : 1.0)
+            .background {
+                shape.fill(.thinMaterial).allowsHitTesting(false)
+            }
+            .overlay {
+                shape.strokeBorder(strokeColor, lineWidth: 1).allowsHitTesting(false)
+            }
+            .overlay {
+                shape.inset(by: 0.5).strokeBorder(innerShine, lineWidth: 0.75).allowsHitTesting(false)
+            }
+            .opacity(opacity)
+            .contentShape(shape)
     }
 }
 
-public extension View {
-    func glassCard(radius: CGFloat = 18, level: ElevationLevel = .card, material: Material = .thin) -> some View {
-        self.modifier(GlassCardModifier(radius: radius, level: level, material: material))
-    }
-
-    func glassChip(state: GlassChipModifier.State = .normal, material: Material = .ultraThin) -> some View {
-        self.modifier(GlassChipModifier(state: state, material: material))
+extension View {
+    func glassChip(state: GlassChipModifier.State = .normal) -> some View {
+        modifier(GlassChipModifier(state: state))
     }
 }
