@@ -10,5 +10,13 @@ import Foundation
 /// Your shared app group used for cross-process UserDefaults.
 /// If your identifier is different, change it here in one place.
 enum AppGroups {
-    static let main = "group.com.hodlsimulator.alarmstacks"
+    /// Canonical App Group identifier.
+    static let suite = "group.com.hodlsimulator.alarmstacks"
+
+    /// Backward-compat alias for older call sites (e.g. widget code).
+    static let main = suite
+
+    /// Convenience accessor for the group defaults (nil if misconfigured).
+    static let defaults: UserDefaults? = UserDefaults(suiteName: suite)
 }
+    

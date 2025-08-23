@@ -54,12 +54,24 @@ private enum UD {
 /// Don’t surface the LA if the earliest step is too far away (prevents “in 23h” flash).
 private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2h
 
-/// Retry/backoff for transient errors like `visibility` or `targetMaximumExceeded`
-private let RETRY_INITIAL_DELAY: TimeInterval = 15
-private let RETRY_MAX_DELAY: TimeInterval = 90
+/// When leaving the app, allow earlier prewarm so we don’t get blocked by `visibility` later.
+private let LEAVE_PREWARM_WINDOW: TimeInterval = 45 * 60 // 45m
 
-/// Foreground tick cadence to proactively start/update LAs while we’re visible.
+/// Retry cadence + horizon for transient `visibility` / `targetMaximumExceeded`
+private let RETRY_TICK: TimeInterval = 5        // try every 5s
+private let RETRY_AFTER_TARGET: TimeInterval = 180 // keep trying up to +3m after target
+
+/// Foreground tick cadence to proactively start/update LAs while visible.
 private let FOREGROUND_TICK: TimeInterval = 30
+
+@inline(__always)
+private func isAppActive() -> Bool {
+    #if canImport(UIKit)
+    return UIApplication.shared.applicationState == .active
+    #else
+    return true
+    #endif
+}
 
 /// Try to pull a stackID string out of any object (e.g. your `Stack` model)
 private func extractStackIDString(from any: Any) -> String? {
@@ -104,9 +116,16 @@ final class LiveActivityManager {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { [weak self] in
-                    await self?._onWillResignActive()
-                }
+                Task { @MainActor in await self?._onWillResignActive() }
+            }
+        )
+        uiObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in await self?._onWillEnterForeground() }
             }
         )
         uiObservers.append(
@@ -115,9 +134,17 @@ final class LiveActivityManager {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { [weak self] in
-                    await self?._onDidBecomeActive()
-                }
+                Task { @MainActor in await self?._onDidBecomeActive() }
+            }
+        )
+        uiObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                // Device just unlocked → try again immediately.
+                Task { @MainActor in await self?._onProtectedDataAvailable() }
             }
         )
         #endif
@@ -167,20 +194,18 @@ final class LiveActivityManager {
         retryTasks.removeValue(forKey: stackID)?.cancel()
     }
 
-    /// Retry until a little after the target (or until success).
+    /// Retry until a little after the target (or until success), with a **fast 5s cadence**.
     private func scheduleRetry(for stackID: String, until deadline: Date) {
         guard retryTasks[stackID] == nil else { return }
         MiniDiag.log("[ACT] retry.schedule stack=\(stackID) until=\(deadline)")
         retryTasks[stackID] = Task { [weak self] in
-            var delay = RETRY_INITIAL_DELAY
             while !Task.isCancelled {
                 if Date() > deadline { break }
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(RETRY_TICK * 1_000_000_000))
                 if Task.isCancelled { break }
                 Task { @MainActor in
                     await LiveActivityManager.shared.sync(stackID: stackID, reason: "retry.timer")
                 }
-                delay = min(RETRY_MAX_DELAY, delay * 2)
             }
             let _: Void = await MainActor.run { [weak self] in
                 self?.retryTasks[stackID] = nil
@@ -190,7 +215,20 @@ final class LiveActivityManager {
 
     // MARK: Primary entrypoint
 
-    func sync(stackID: String, reason: String = "sync", excludeID: String? = nil) async {
+    /// - Parameter nearWindowOverride:
+    ///   Use to temporarily tighten/loosen the visibility guard (e.g. when leaving the app).
+    func sync(stackID: String,
+              reason: String = "sync",
+              excludeID: String? = nil,
+              nearWindowOverride: TimeInterval? = nil) async {
+
+        // If the user has globally disabled activities, don’t churn.
+        let auth = ActivityAuthorizationInfo()
+        if !auth.areActivitiesEnabled {
+            MiniDiag.log("[ACT] skip stack=\(stackID) auth.disabled")
+            return
+        }
+
         let now = Date()
         let existing = Activity<AlarmActivityAttributes>.activities.first { $0.attributes.stackID == stackID }
 
@@ -204,13 +242,19 @@ final class LiveActivityManager {
             return
         }
 
-        // Far-future guard — end or no-op to avoid “in 23h” flashes.
+        // Far-future guard — avoid early “in 23h” flashes.
         let lead = chosen.date.timeIntervalSince(now)
-        if lead > LA_NEAR_WINDOW {
+        let window = nearWindowOverride ?? LA_NEAR_WINDOW
+        if lead > window {
             if let a = existing {
-                let st = a.content.state
-                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+                // Do NOT end while backgrounded; keep whatever is visible.
+                if isAppActive() {
+                    let st = a.content.state
+                    await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                    MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+                } else {
+                    MiniDiag.log("[ACT] refresh.keep stack=\(stackID) far-future lead=\(Int(lead))s (bg) → keep")
+                }
             } else {
                 MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
             }
@@ -244,6 +288,8 @@ final class LiveActivityManager {
             }
             await a.update(ActivityContent(state: next, staleDate: nil))
             MiniDiag.log("[ACT] refresh.update stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
+            LADiag.logTimer(whereFrom: "refresh.update", start: nil, end: next.ends)
+            LADiag.logAuthAndActive(from: "refresh.update", stackID: stackID, expectingAlarmID: next.alarmID)
             cancelRetry(for: stackID)
             return
         }
@@ -255,21 +301,25 @@ final class LiveActivityManager {
                 pushType: nil
             )
             MiniDiag.log("[ACT] start stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
+            LADiag.logTimer(whereFrom: "start", start: nil, end: next.ends)
+            LADiag.logAuthAndActive(from: "start", stackID: stackID, expectingAlarmID: next.alarmID)
             cancelRetry(for: stackID)
         } catch {
             let msg = String(describing: error)
             MiniDiag.log("[ACT] start FAILED stack=\(stackID) error=\(msg)")
-            // If OS thinks there are “too many”, end ours so a later request can succeed.
+            LADiag.logAuthAndActive(from: "start.failed", stackID: stackID, expectingAlarmID: next.alarmID)
+
+            // If OS thinks there are “too many”, end extras so a later request can succeed.
             if msg.localizedCaseInsensitiveContains("maximum number of activities") ||
                msg.localizedCaseInsensitiveContains("targetMaximumExceeded") {
                 await cleanupOverflow(keeping: nil)
-                let stopBy = chosen.date.addingTimeInterval(90)
+                let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
                 scheduleRetry(for: stackID, until: stopBy)
                 return
             }
-            // Visibility: we’re likely background/locked. Keep trying a bit past target.
+            // Visibility: we’re likely background/locked. Keep trying a bit past target with fast cadence.
             if msg.localizedCaseInsensitiveContains("visibility") {
-                let stopBy = chosen.date.addingTimeInterval(90)
+                let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
                 scheduleRetry(for: stackID, until: stopBy)
             }
         }
@@ -354,6 +404,8 @@ final class LiveActivityManager {
 
         await a.update(ActivityContent(state: st, staleDate: nil))
         MiniDiag.log("[ACT] markFiredNow stack=\(stackID) step=\(st.stepTitle) firedAt=\(firedAt) ends=\(ends) id=\(st.alarmID)")
+        LADiag.logTimer(whereFrom: "markFiredNow", start: firedAt, end: ends)
+        LADiag.logAuthAndActive(from: "markFiredNow", stackID: stackID, expectingAlarmID: st.alarmID)
     }
 
     // MARK: - Candidate selection
@@ -449,9 +501,17 @@ final class LiveActivityManager {
         #if canImport(UIKit)
         stopForegroundTick()
         #endif
+        // Prewarm on exit if the next step is within 45 minutes
         let ids = allKnownStackIDs()
         for sid in ids {
-            await sync(stackID: sid, reason: "prewarm.willResignActive")
+            await sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
+        }
+    }
+
+    private func _onWillEnterForeground() async {
+        // We’re about to be visible; if a retry was pending, try immediately.
+        for sid in Array(retryTasks.keys) {
+            await sync(stackID: sid, reason: "retry.willEnterForeground")
         }
     }
 
@@ -462,5 +522,12 @@ final class LiveActivityManager {
         #if canImport(UIKit)
         startForegroundTick()
         #endif
+    }
+
+    private func _onProtectedDataAvailable() async {
+        // Device just unlocked; try again for any pending stack (helps right after unlock).
+        for sid in Array(retryTasks.keys) {
+            await sync(stackID: sid, reason: "retry.protectedDataAvailable")
+        }
     }
 }

@@ -105,8 +105,8 @@ enum DiagLog {
         let b = group?.stringArray(forKey: key) ?? []
         var set = Set<String>()
         var merged = [String]()
-        for s in a + b {
-            if set.insert(s).inserted { merged.append(s) }
+        for line in (a + b) {
+            if set.insert(line).inserted { merged.append(line) }
         }
         // Lexicographic sort works with our stable timestamp prefix.
         merged.sort()
@@ -147,7 +147,7 @@ enum LADiag {
         let enabled = info.areActivitiesEnabled
         let acts = Activity<AlarmActivityAttributes>.activities
 
-        // Summarize as "stackID:alarmID"
+        // Summarise as "stackID:alarmID"
         let summary = acts.map { a in
             let sid = a.attributes.stackID
             let aid = a.content.state.alarmID
@@ -160,6 +160,26 @@ enum LADiag {
         }()
 
         DiagLog.log("[ACT] state from=\(whereFrom) stack=\(stackID ?? "-") auth.enabled=\(enabled ? "y" : "n") active.count=\(acts.count) active{\(summary)} expecting=\(expectingAlarmID ?? "-") seen=\(seenExpected)")
+    }
+
+    /// Timer direction diagnostic. Reports whether LA is counting **down** to `end`
+    /// or **up** from `start` (if provided). Mirrors the strings you’re seeing in the log.
+    static func logTimer(whereFrom: String, start: Date?, end: Date, now: Date = Date()) {
+        if let start {
+            // If we have a start, treat it as “ringing” (count up).
+            let elapsed = max(0, now.timeIntervalSince(start))
+            DiagLog.log(String(
+                format: "[ACT] timer where=%@ dir=up start=%@ end=%@ now=%@ remain=- elapsed=%.3fs",
+                whereFrom, DiagLog.f(start), DiagLog.f(end), DiagLog.f(now), elapsed
+            ))
+        } else {
+            // No start → pre-ring (count down).
+            let remain = max(0, end.timeIntervalSince(now))
+            DiagLog.log(String(
+                format: "[ACT] timer where=%@ dir=down start=- end=%@ now=%@ remain=%.3fs elapsed=-s",
+                whereFrom, DiagLog.f(end), DiagLog.f(now), remain
+            ))
+        }
     }
 }
 

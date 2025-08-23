@@ -187,8 +187,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         }
         #endif
 
-        // Track first enabled step’s nominal for offsets.
+        // Track first enabled step’s nominal for offsets + prearm only once
         var firstNominal: Date?
+        var didPrearm = false
 
         for step in stack.sortedSteps where step.isEnabled {
             let nominalFireDate: Date
@@ -211,6 +212,12 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             let rawLead = max(0, nominalFireDate.timeIntervalSince(now))
             let seconds = max(minLead, Int(ceil(rawLead)))
             let effectiveTarget = now.addingTimeInterval(TimeInterval(seconds))
+
+            // 🔹 Prearm LA for the *first* enabled step so the activity is ready.
+            if !didPrearm {
+                LiveActivityManager.ensurePrearmed(stackID: stack.id.uuidString, effTarget: effectiveTarget)
+                didPrearm = true
+            }
 
             let id = UUID()
 

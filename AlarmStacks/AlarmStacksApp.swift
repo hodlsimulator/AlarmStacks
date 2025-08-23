@@ -1,3 +1,4 @@
+//
 //  AlarmStacksApp.swift
 //  AlarmStacks
 //
@@ -152,6 +153,8 @@ struct AlarmStacksApp: App {
             if newPhase == .active {
                 Task { @MainActor in
                     AppLifecycleSanitiser.foregroundPass()
+                    // Drain any queued Live Activity prearm attempts now that we're active.
+                    LiveActivityManager.drainForegroundQueue()
                 }
             }
         }
