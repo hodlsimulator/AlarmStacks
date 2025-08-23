@@ -34,22 +34,61 @@ struct ForegroundAlarmOverlay: ViewModifier {
     #if canImport(AlarmKit)
     @ViewBuilder
     private func overlay(for alarm: Alarm) -> some View {
+        // Resolve "next up" info from the shared bridge (preferred).
+        let next = NextAlarmBridge.read()
+
+        // Fallback to metadata we persisted per-alarm when scheduling (for the CURRENT ringing alarm).
+        let ud = UserDefaults.standard
+        let currentStack = ud.string(forKey: "ak.stackName.\(alarm.id.uuidString)") ?? "Alarm"
+        let currentStep  = ud.string(forKey: "ak.stepTitle.\(alarm.id.uuidString)") ?? "Now"
+
         VStack {
             Spacer(minLength: 0)
             HStack(spacing: 10) {
-                // Leading text compresses first so buttons never wrap
+                // Leading: concise next-step details (no filler wording).
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Alarm ringing")
-                        .font(.headline)
-                        .singleLineTightTail(minScale: 0.85)
-                    Text("Tap to stop or snooze")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .singleLineTightTail(minScale: 0.85)
+                    NextChip()
+
+                    if let info = next {
+                        Text(info.stepTitle)
+                            .font(.headline)
+                            .singleLineTightTail(minScale: 0.85)
+
+                        Text(info.stackName)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .singleLineTightTail(minScale: 0.85)
+                    } else {
+                        // If we can't determine the NEXT step, at least show what’s ringing now.
+                        Text(currentStep)
+                            .font(.headline)
+                            .singleLineTightTail(minScale: 0.85)
+
+                        Text(currentStack)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .singleLineTightTail(minScale: 0.85)
+                    }
                 }
-                .layoutPriority(0)
+                .layoutPriority(1)
 
                 Spacer(minLength: 8)
+
+                // If we know the next step's time, show a compact countdown (or absolute time if overdue).
+                if let info = next {
+                    Group {
+                        if info.fireDate > Date() {
+                            Text(info.fireDate, style: .timer)
+                                .monospacedDigit()
+                        } else {
+                            Text(info.fireDate, style: .time)
+                                .monospacedDigit()
+                        }
+                    }
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                }
 
                 // STOP (prominent)
                 Button {
@@ -58,7 +97,7 @@ struct ForegroundAlarmOverlay: ViewModifier {
                     StopButtonLabel()
                 }
                 .buttonStyle(.borderedProminent)
-                .layoutPriority(1) // keep on one line
+                .layoutPriority(1)
 
                 // SNOOZE (only if allowed)
                 if alarm.countdownDuration?.postAlert != nil {
@@ -68,7 +107,7 @@ struct ForegroundAlarmOverlay: ViewModifier {
                         SnoozeButtonLabel()
                     }
                     .buttonStyle(.bordered)
-                    .layoutPriority(1) // keep on one line
+                    .layoutPriority(1)
                 }
             }
             .padding()
@@ -76,7 +115,8 @@ struct ForegroundAlarmOverlay: ViewModifier {
             .padding()
         }
         .accessibilityElement(children: .contain)
-        .accessibilityHint("Controls for the currently ringing alarm.")
+        .accessibilityLabel(Text(next != nil ? "Next step" : "Current alarm"))
+        .accessibilityHint(Text("Stop or snooze."))
     }
     #endif
 }
@@ -94,7 +134,6 @@ private struct StopButtonLabel: View {
                 .singleLineTightTail(minScale: 0.85)
                 .layoutPriority(1)
         }
-        // Prevent vertical growth that could invite wrapping
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())
     }
@@ -107,12 +146,31 @@ private struct SnoozeButtonLabel: View {
                 .imageScale(.medium)
             Text("Snooze")
                 .font(.title3.bold())
-                .singleLineTightTail(minScale: 0.85) // tighten, then scale slightly, then ellipsis
+                .singleLineTightTail(minScale: 0.85)
                 .layoutPriority(1)
         }
-        // Prevent vertical growth that could invite wrapping
         .fixedSize(horizontal: false, vertical: true)
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Small status chip (matches LA tone; no filler text)
+private struct NextChip: View {
+    var body: some View {
+        Text("NEXT STEP")
+            .font(.caption2.weight(.semibold))
+            .tracking(0.8)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.clear)
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(Color.primary.opacity(0.20), lineWidth: 1)
+                    )
+            )
+            .singleLineTightTail(minScale: 0.9)
     }
 }
 #endif
@@ -120,4 +178,3 @@ private struct SnoozeButtonLabel: View {
 extension View {
     func alarmStopOverlay() -> some View { modifier(ForegroundAlarmOverlay()) }
 }
-    

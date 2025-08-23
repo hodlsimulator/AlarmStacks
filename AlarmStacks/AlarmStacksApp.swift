@@ -9,6 +9,7 @@ import SwiftUI
 import SwiftData
 import UserNotifications
 import AVFoundation
+import ActivityKit
 
 @MainActor
 final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
@@ -122,6 +123,14 @@ struct AlarmStacksApp: App {
 
         // Enable sanitiser immediately (active mode + canceller + launch pass)
         AppLifecycleSanitiser.start()
+
+        // ✅ Ensure LA lifecycle observers + foreground cadence are live from launch,
+        // and allow the bridge prearm near target if AK keys aren’t present yet.
+        LiveActivityManager.activate()
+
+        // ✅ Boot-time cleanup of stale/blank LAs to prevent opaque “clock-only” tiles.
+        // (Defined in LiveActivityCleanup.swift)
+        cleanupLiveActivitiesOnLaunch()
     }
 
     var body: some Scene {
@@ -153,6 +162,8 @@ struct AlarmStacksApp: App {
             if newPhase == .active {
                 Task { @MainActor in
                     AppLifecycleSanitiser.foregroundPass()
+                    // ✅ No-op if already active; helpful if UIKit notifications were missed.
+                    LiveActivityManager.activate()
                 }
             }
         }

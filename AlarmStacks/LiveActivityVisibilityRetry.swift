@@ -9,46 +9,28 @@ import Foundation
 import ActivityKit
 import UIKit
 
-/// Ensures a Live Activity becomes visible when we detect a "visibility" failure,
-/// and avoids making a request while the app is foreground & near-fire (which often throws).
-/// Intentionally **not** @MainActor so callers anywhere can invoke it; we hop to Main for ActivityKit work.
+/// Deprecated queue/observer-based retry. On iOS 26 we rely on `LiveActivityManager.sync`'s
+/// own fast 5s retry window. We keep this type for source-compatibility, but it now
+/// just forwards to `sync(…, reason: "visibility.retry")` immediately.
 final class LiveActivityVisibilityRetry {
 
     static let shared = LiveActivityVisibilityRetry()
-
-    /// Defer if the next fire is within this window **and** the app is active.
-    private let deferThreshold: TimeInterval = 90 // seconds
-
-    private init() {
-        // Install observers on first use.
-        Task { @MainActor in
-            self.installObserversIfNeeded()
-        }
-    }
+    private init() {}
 
     // MARK: - Public API
 
-    /// Original ordering used at some call sites.
     func enqueue(reason: String = "visibility", stackID: String) {
-        MiniDiag.log("[ACT] LA request failed (\(reason)); queue→attempt stack=\(stackID)")
+        MiniDiag.log("[ACT] LA request failed (\(reason)); forwarding→sync stack=\(stackID)")
         Task { @MainActor in
-            // If there isn't already a more specific closure queued, fall back to a generic "start or update" attempt.
-            if self.pending[stackID] == nil {
-                self.pending[stackID] = { [weak self] in
-                    guard let _ = self else { return }
-                    await LiveActivityManager.startOrUpdateIfNeeded(forStackID: stackID)
-                }
-            }
-            // We don't run immediately here; we wait for lock/background or a manual kick.
+            await LiveActivityManager.shared.sync(stackID: stackID, reason: "visibility.retry")
         }
     }
 
-    /// Supports calls that pass `stackID` first.
     func enqueue(stackID: String, reason: String) {
         enqueue(reason: reason, stackID: stackID)
     }
 
-    // MARK: - Static conveniences (cover other call-site styles)
+    // MARK: - Static conveniences (kept for call-site compatibility)
 
     static func enqueue(reason: String = "visibility", stackID: String) {
         shared.enqueue(reason: reason, stackID: stackID)
@@ -62,95 +44,22 @@ final class LiveActivityVisibilityRetry {
         shared.enqueue(stackID: stackID, reason: reason)
     }
 
-    // MARK: - New: Foreground deferral helper for brand-new starts
+    // MARK: - Foreground deferral helper (now passthrough)
 
-    /// If we’re in the foreground and close to the fire time, **queue** the start until first lock/background.
-    /// Otherwise, execute immediately.
+    /// Formerly deferred starts when the app was active and near fire time.
+    /// Now: always executes immediately and lets `sync` handle visibility/rate limits.
     @MainActor
     func maybeDeferOrRun(
         stackID: String,
         nextFire: Date,
         execute: @escaping () async -> Void
     ) async {
-        let lead = nextFire.timeIntervalSinceNow
-        let state = UIApplication.shared.applicationState
-
-        if state == .active, lead <= deferThreshold {
-            // Coalesce: one runnable per stack.
-            pending[stackID] = execute
-            MiniDiag.log("[ACT] defer.queue stack=\(stackID) lead=\(Int(lead))s state=active")
-        } else {
-            await execute()
-        }
+        MiniDiag.log("[ACT] defer.skip (passthrough) stack=\(stackID) remain=~\(Int(nextFire.timeIntervalSinceNow))s")
+        await execute()
     }
 
-    /// Manual kick (rarely needed; observers normally kick for us)
+    /// No-op kick; retained for compatibility with older call sites.
     func kick(_ reason: String = "manual") {
-        Task { @MainActor in
-            await self.drain(reason: reason)
-        }
-    }
-
-    // MARK: - Internals (MainActor)
-
-    @MainActor
-    private var observersInstalled = false
-
-    /// Coalesced pending attempts keyed by stackID.
-    @MainActor
-    private var pending: [String: () async -> Void] = [:]
-
-    @MainActor
-    private var tokens: [NSObjectProtocol] = []
-
-    @MainActor
-    private func installObserversIfNeeded() {
-        guard observersInstalled == false else { return }
-        observersInstalled = true
-
-        let nc = NotificationCenter.default
-
-        let t1 = nc.addObserver(
-            forName: UIApplication.willResignActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.drain(reason: "willResignActive")
-            }
-        }
-
-        let t2 = nc.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                await self.drain(reason: "didEnterBackground")
-            }
-        }
-
-        tokens.append(contentsOf: [t1, t2])
-    }
-
-    /// Run and clear all queued attempts.
-    @MainActor
-    private func drain(reason: String) async {
-        guard pending.isEmpty == false else {
-            MiniDiag.log("[ACT] defer.kick \(reason) (empty)")
-            return
-        }
-
-        // Snapshot then clear to avoid re-entrancy issues if execute() re-queues.
-        let runnables = pending
-        pending.removeAll()
-        MiniDiag.log("[ACT] defer.kick \(reason) queued=\(runnables.count)")
-
-        for (stackID, op) in runnables {
-            MiniDiag.log("[ACT] defer.run stack=\(stackID)")
-            await op()
-        }
+        MiniDiag.log("[ACT] defer.kick \(reason) (noop)")
     }
 }

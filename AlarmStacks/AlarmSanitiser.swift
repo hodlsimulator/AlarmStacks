@@ -27,6 +27,31 @@ public final class AlarmSanitiser {
         case foreground
     }
 
+    // Lightweight log level so we can reduce console noise by default.
+    public enum LogLevel {
+        case off
+        case summary
+        case verbose
+    }
+
+    /// Adjust this if you want more/less console output.
+    public var logLevel: LogLevel = {
+        #if DEBUG
+        return .summary
+        #else
+        return .summary
+        #endif
+    }()
+
+    /// If true, also echo to stdout (`print`). Off by default to avoid Xcode spam.
+    public var echoToConsole: Bool = {
+        #if DEBUG
+        return false
+        #else
+        return false
+        #endif
+    }()
+
     // MARK: - Configuration
 
     /// Inject a canceller to actually stop system timers for a given id.
@@ -76,7 +101,7 @@ public final class AlarmSanitiser {
     /// Run a full audit/cleanup pass. Call on cold start and on every foreground.
     public func run(reason: Reason) {
         let started = Date()
-        logSAN("launch=\(reason.rawValue) mode=\(modeString) notif=\(notifStateString)")
+        logSAN("launch=\(reason.rawValue) mode=\(modeString) notif=\(notifStateString)", level: .summary)
 
         // 1) Snapshot universe of keys from both stores
         let allKeys = keysUnion()
@@ -156,10 +181,10 @@ public final class AlarmSanitiser {
         enqueue(oldGenIDs, "old_generation")
         enqueue(expiredIDs, "expired")
 
-        // NEVER destructive for "untracked" — log only.
+        // NEVER destructive for "untracked" — log only (verbose).
         if !untrackedIDs.isEmpty {
             for id in untrackedIDs {
-                logSAN("untracked id=\(id) — NOT cancelling (log-only)")
+                logSAN("untracked id=\(id) — NOT cancelling (log-only)", level: .verbose)
             }
         }
 
@@ -169,7 +194,7 @@ public final class AlarmSanitiser {
             if mode == .active {
                 cancelAndWipe(id: tup.id, reason: tup.reason)
             } else {
-                logSAN("would-cancel id=\(tup.id) reason=\(tup.reason)")
+                logSAN("would-cancel id=\(tup.id) reason=\(tup.reason)", level: .verbose)
             }
             cancelledIDs.insert(tup.id)
         }
@@ -190,11 +215,11 @@ public final class AlarmSanitiser {
                 }
                 trackedByStack[stack] = list
                 changedStacks.insert(stack)
-                logSAN("repair tracked swap stack=\(stack) base=\(baseID) -> snooze=\(snoozeID)")
+                logSAN("repair tracked swap stack=\(stack) base=\(baseID) -> snooze=\(snoozeID)", level: .verbose)
             } else if hadBase && hasSnooze {
                 trackedByStack[stack] = list.filter { $0 != baseID }
                 changedStacks.insert(stack)
-                logSAN("repair tracked dedupe stack=\(stack) dropBase=\(baseID)")
+                logSAN("repair tracked dedupe stack=\(stack) dropBase=\(baseID)", level: .verbose)
             }
         }
 
@@ -222,31 +247,34 @@ public final class AlarmSanitiser {
             let ids = trackedByStack[stack] ?? []
             let loc = listLocation[stack] ?? (grp != nil ? .group : .standard)
             writeStringArray(ids, forStack: stack, to: loc)
-            logSAN("wrote tracked list stack=\(stack) count=\(ids.count)")
+            logSAN("wrote tracked list stack=\(stack) count=\(ids.count)", level: .verbose)
         }
 
-        // 14) Snapshot counts
+        // 14) Snapshot counts (summary)
         let orphanCount = untrackedIDs.count
         let brokenCount = brokenIDs.count
         let snozCount = snoozeOrphans.count
         let expiredCount = expiredIDs.count
         let oldGenCount = oldGenIDs.count
 
-        logSAN("snapshot tracked=\(trackedIDs.count) meta=\(metaIDs.count) " +
-               "orphans=\(orphanCount) broken=\(brokenCount) snoozeOrphans=\(snozCount) " +
-               "expired=\(expiredCount) oldGen=\(oldGenCount) cancelled=\(cancelledIDs.count)")
+        logSAN(
+            "snapshot tracked=\(trackedIDs.count) meta=\(metaIDs.count) " +
+            "orphans=\(orphanCount) broken=\(brokenCount) snoozeOrphans=\(snozCount) " +
+            "expired=\(expiredCount) oldGen=\(oldGenCount) cancelled=\(cancelledIDs.count)",
+            level: .summary
+        )
 
-        // 15) Recon hint
+        // 15) Recon hint (summary)
         if let next = computeNextPendingID(from: trackedByStack) {
             let df = ISO8601DateFormatter()
-            logRECON("found next id=\(next.id) date=\(df.string(from: next.date))")
+            logRECON("found next id=\(next.id) date=\(df.string(from: next.date))", level: .summary)
         } else {
-            logRECON("no next id (idle)")
+            logRECON("no next id (idle)", level: .summary)
         }
 
-        // 16) Done
+        // 16) Done (summary)
         let durMs = Int(Date().timeIntervalSince(started) * 1000)
-        logSAN("end elapsedMs=\(durMs)")
+        logSAN("end elapsedMs=\(durMs)", level: .summary)
     }
 
     // MARK: - Internals
@@ -334,8 +362,8 @@ public final class AlarmSanitiser {
         }
         // Also include any snoozeID values
         let sm = readSnoozeMap(from: keys)
-        for (_, snoozeID) in sm {
-            if !snoozeID.isEmpty { ids.insert(snoozeID) }
+        for (_, snoozeID) in sm where !snoozeID.isEmpty {
+            ids.insert(snoozeID)
         }
         return ids
     }
@@ -352,7 +380,7 @@ public final class AlarmSanitiser {
     }
 
     private func cancelAndWipe(id: String, reason: String) {
-        logSAN("cancel id=\(id) reason=\(reason)")
+        logSAN("cancel id=\(id) reason=\(reason)", level: .verbose)
         // 1) Cancel underlying timer (if a canceller is provided)
         if let canceller { canceller(id) }
 
@@ -390,14 +418,24 @@ public final class AlarmSanitiser {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "AlarmStacks", category: "SAN")
 
-    private func logSAN(_ message: String) {
-        logger.log("[SAN] \(message, privacy: .public)")
-        print("[SAN] \(message)")
+    private func shouldLog(_ level: LogLevel) -> Bool {
+        switch (logLevel, level) {
+        case (.off, _):            return false
+        case (.summary, .verbose): return false
+        default:                   return true
+        }
     }
 
-    private func logRECON(_ message: String) {
+    private func logSAN(_ message: String, level: LogLevel = .verbose) {
+        guard shouldLog(level) else { return }
+        logger.log("[SAN] \(message, privacy: .public)")
+        if echoToConsole { print("[SAN] \(message)") }
+    }
+
+    private func logRECON(_ message: String, level: LogLevel = .verbose) {
+        guard shouldLog(level) else { return }
         logger.log("[RECON] \(message, privacy: .public)")
-        print("[RECON] \(message)")
+        if echoToConsole { print("[RECON] \(message)") }
     }
 
     private var modeString: String {

@@ -9,11 +9,8 @@ import Foundation
 import ActivityKit
 import os
 
-/// iOS 26+
+/// iOS 16.2+
 /// Coalesced, throttled pre-arm for Live Activities so we don't hit ActivityKit rate limits.
-/// - Plans a small number of attempts at strategic offsets before `effTarget`
-/// - Cancels any older plan for the same `stackID`
-/// - Throttles globally to avoid rapid-fire `start` calls
 extension LiveActivityManager {
 
     private static let _log = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "LA.Prearm")
@@ -21,6 +18,41 @@ extension LiveActivityManager {
     // One plan (Task) per stackID, so reschedules replace older plans.
     private static var _plans = [String: Task<Void, Never>]()
     private static let _gate = LAStartGate()
+
+    // Latest payload we should surface in the Live Activity at prearm time.
+    public struct LAStartPayload: Sendable {
+        public let stackID: String
+        public let stackName: String
+        public let stepTitle: String
+        public let ends: Date
+        public let allowSnooze: Bool
+        public let alarmID: String
+        public let theme: ThemePayload
+
+        public init(stackID: String,
+                    stackName: String,
+                    stepTitle: String,
+                    ends: Date,
+                    allowSnooze: Bool,
+                    alarmID: String,
+                    theme: ThemePayload) {
+            self.stackID = stackID
+            self.stackName = stackName
+            self.stepTitle = stepTitle
+            self.ends = ends
+            self.allowSnooze = allowSnooze
+            self.alarmID = alarmID
+            self.theme = theme
+        }
+    }
+
+    private static var _latestPayload = [String: LAStartPayload]()
+
+    /// Record the latest state that should be shown when we prearm this stack's LA.
+    /// Call this when you schedule/update a step, right before `prearmIfNeeded(...)`.
+    public static func recordPrearmContext(_ payload: LAStartPayload) {
+        _latestPayload[payload.stackID] = payload
+    }
 
     /// Cancel any pending prearm plan for this stack.
     static func cancelPrearm(for stackID: String) {
@@ -49,14 +81,8 @@ extension LiveActivityManager {
             return
         }
 
-        // Fuse tripped? Skip scheduling any attempts.
-        if isInCooldown {
-            DiagLog.log("[LA] prearm.skip (cooldown) stack=\(stackID)")
-            return
-        }
-
-        // Choose sparse offsets to avoid rate-limit: try at T-31s and T-11s.
-        let offsets: [TimeInterval] = [31, 11]
+        // Choose sparse offsets to avoid rate-limit (tweak as you like).
+        let offsets: [TimeInterval] = [55, 25]
 
         // Compute absolute attempt times, drop ones already in the past.
         let planTimes = offsets
@@ -66,7 +92,7 @@ extension LiveActivityManager {
         if planTimes.isEmpty {
             // We missed our windows; do a single attempt now.
             if Task.isCancelled == false {
-                await attemptStartNow(stackID: stackID, calendar: calendar, effTarget: effTarget)
+                await attemptStartNow(stackID: stackID, effTarget: effTarget)
             }
             return
         }
@@ -81,34 +107,49 @@ extension LiveActivityManager {
                 do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                 catch { break } // cancelled
                 if Task.isCancelled { break }
-                await attemptStartNow(stackID: stackID, calendar: calendar, effTarget: effTarget)
+                await attemptStartNow(stackID: stackID, effTarget: effTarget)
             }
         }
 
         _plans[stackID] = task
     }
 
-    /// Single, gated `start` attempt; does nothing if throttled/cooldown/disabled.
+    /// Single, gated `start` attempt; does nothing if throttled/disabled.
     @MainActor
-    private static func attemptStartNow(stackID: String, calendar: Calendar, effTarget: Date) async {
+    private static func attemptStartNow(stackID: String, effTarget: Date) async {
         if LAFlags.deviceDisabled {
             DiagLog.log("[LA] prearm.attempt.skip (device disabled) stack=\(stackID)")
             return
         }
-        if isInCooldown {
-            DiagLog.log("[LA] prearm.attempt.skip (cooldown) stack=\(stackID)")
+
+        let remain = effTarget.timeIntervalSinceNow
+        if remain < 25 {
+            DiagLog.log(String(format: "[LA] prearm.create.skip (too close; remain=%.0fs) stack=%@", remain, stackID))
             return
         }
 
-        let now = Date()
-        let ok = await _gate.shouldAttempt(now: now)
+        let ok = await _gate.shouldAttempt(now: Date())
         if ok == false {
             DiagLog.log("[LA] prearm (throttled) stack=\(stackID)")
             return
         }
-        DiagLog.log(String(format: "[LA] prearm attempt stack=%@ remain=%.0fs",
-                           stackID, effTarget.timeIntervalSinceNow))
-        start(stackID: stackID, calendar: calendar)
+
+        DiagLog.log(String(format: "[LA] prearm attempt stack=%@ remain=%.0fs", stackID, remain))
+
+        // <<< NEW: actually start/update our LA using the last known payload for this stack >>>
+        guard let p = _latestPayload[stackID] else {
+            DiagLog.log("[LA] prearm.attempt.skip (no payload) stack=\(stackID)")
+            return
+        }
+        await LiveActivityController.shared.prearmOrUpdate(
+            stackID: p.stackID,
+            stackName: p.stackName,
+            stepTitle: p.stepTitle,
+            ends: p.ends,
+            allowSnooze: p.allowSnooze,
+            alarmID: p.alarmID,
+            theme: p.theme
+        )
     }
 }
 
@@ -116,13 +157,13 @@ extension LiveActivityManager {
 private actor LAStartGate {
     // No more than `maxAttempts` within `windowLength`.
     private let windowLength: TimeInterval = 120   // 2 minutes
-    private let maxAttempts: Int = 4               // across all stacks
+    private let maxAttempts: Int = 3               // across all stacks
     private var windowStart: Date = .distantPast
     private var attemptsInWindow: Int = 0
     private var lastAttemptAt: Date = .distantPast
 
     // Also add a tiny per-attempt cooldown so we never call twice within a few seconds.
-    private let minSpacing: TimeInterval = 4
+    private let minSpacing: TimeInterval = 5
 
     func shouldAttempt(now: Date) -> Bool {
         // Per-attempt spacing

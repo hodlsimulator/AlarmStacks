@@ -142,7 +142,7 @@ final class AlarmController: ObservableObject {
                         // -----------------------------------------
 
                         // Live Activity stamp
-                        Task { await LiveActivityManager.markFiredNow() }
+                        Task { LiveActivityManager.markFiredNow() }
                     } else {
                         self.alertingAlarm = nil
                     }
@@ -198,7 +198,7 @@ final class AlarmController: ObservableObject {
     func auditAKNow() {
         #if canImport(AlarmKit)
         let counts  = Dictionary(grouping: lastSnapshot, by: { $0.state }).mapValues { $0.count }
-        let summary = counts.map { "\($0.key)=\($0.value)" }.sorted().joined(separator: " ")
+        let summary = counts.map { "\($0.key)=\($0.value)" }.sorted().joined().replacingOccurrences(of: "=", with: "=").replacingOccurrences(of: ",", with: " ")
         DiagLog.log("AK snapshot size=\(lastSnapshot.count) states{\(summary)} env={\(AppEnv.snapshot())}")
         #endif
     }

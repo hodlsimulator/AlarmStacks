@@ -1,3 +1,4 @@
+//
 //  AlarmScheduler.swift
 //  AlarmStacks
 //
@@ -46,8 +47,9 @@ final class UserNotificationScheduler: AlarmScheduling {
 
         switch settings.authorizationStatus {
         case .notDetermined:
+            // We request .alert for general capability, but we **never** use audible/visible alerts for alarms.
             let granted = try await center.requestAuthorization(
-                options: [.alert, .sound, .badge, .providesAppNotificationSettings]
+                options: [.alert, .badge, .providesAppNotificationSettings]
             )
             if !granted {
                 throw NSError(
@@ -71,9 +73,7 @@ final class UserNotificationScheduler: AlarmScheduling {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         _ = try? await requestAuthorizationIfNeeded()
 
-        // ⛔️ Removed preflight LA start — this was causing the “in 23 hours” flash.
-        // await LiveActivityManager.start(stack: stack, calendar: calendar)
-
+        // ⛔️ Do not pre-start LA here; AK/LA prearm logic elsewhere handles visibility.
         let center = UNUserNotificationCenter.current()
         await cancelAll(for: stack)
 
@@ -92,9 +92,11 @@ final class UserNotificationScheduler: AlarmScheduling {
                 lastFireDate = fireDate
             }
 
-            // Build content (per-step snooze overrides Settings)
+            // Build **silent, passive** content so UN is never a visible/aloud surface.
             let id = notificationID(stackID: stack.id, stepID: step.id, index: index)
-            let content = buildContent(for: step, stackName: stack.name, stackID: stack.id.uuidString)
+            let content = buildSilentContent(for: step,
+                                             stackName: stack.name,
+                                             stackID: stack.id.uuidString)
 
             // Robust trigger selection near "now"
             let lead = max(1, Int(ceil(fireDate.timeIntervalSinceNow)))
@@ -103,11 +105,11 @@ final class UserNotificationScheduler: AlarmScheduling {
             let trigger: UNNotificationTrigger
             if useInterval {
                 trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(lead), repeats: false)
-                DiagLog.log("UN schedule id=\(id) in \(lead)s (interval); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
+                DiagLog.log("UN schedule (silent) id=\(id) in \(lead)s (interval); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
             } else {
                 let comps = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: fireDate)
                 trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
-                DiagLog.log("UN schedule id=\(id) in ~\(lead)s (calendar); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
+                DiagLog.log("UN schedule (silent) id=\(id) in ~\(lead)s (calendar); stack=\(stack.name); step=\(step.title); target=\(fireDate)")
             }
 
             let request = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
@@ -119,7 +121,7 @@ final class UserNotificationScheduler: AlarmScheduling {
             identifiers.append(id)
         }
 
-        // ✅ Start/update the Live Activity only after notifications are scheduled.
+        // ✅ Ensure Live Activity reflects the latest schedule.
         LiveActivityManager.start(for: stack, calendar: calendar)
 
         return identifiers
@@ -146,16 +148,27 @@ final class UserNotificationScheduler: AlarmScheduling {
 
     // MARK: - Helpers
 
-    private func buildContent(for step: Step, stackName: String, stackID: String) -> UNMutableNotificationContent {
+    /// Silent, passive content for **alarm** scheduling via UN (fallback only).
+    /// - No banner, no sound, minimal surface. AK/LA provide the UI.
+    private func buildSilentContent(for step: Step, stackName: String, stackID: String) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
-        content.title = stackName
-        content.subtitle = step.title
-        content.body = body(for: step)
-        content.sound = .default
-        content.interruptionLevel = .timeSensitive
-        content.threadIdentifier = "stack-\(stackID)"
 
-        content.categoryIdentifier = "ALARM_CATEGORY"
+        // Intentionally blank — keep chrome out of Notification Center.
+        content.title = ""
+        content.subtitle = ""
+        content.body = ""
+
+        // Absolutely no UN audio.
+        content.sound = nil
+
+        // Passive = no banner for background deliveries.
+        content.interruptionLevel = .passive
+        content.relevanceScore = 0
+
+        // Retain thread & category so our delegate can correlate and handle actions silently.
+        content.threadIdentifier = "stack-\(stackID)"
+        content.categoryIdentifier = NotificationCategoryID.alarm
+
         content.userInfo = [
             "stackID": stackID,
             "stepID": step.id.uuidString,
@@ -163,20 +176,6 @@ final class UserNotificationScheduler: AlarmScheduling {
             "allowSnooze": step.allowSnooze
         ]
         return content
-    }
-
-    private func body(for step: Step) -> String {
-        switch step.kind {
-        case .fixedTime:
-            if let h = step.hour, let m = step.minute { return String(format: "Scheduled for %02d:%02d", h, m) }
-            return "Scheduled"
-        case .timer:
-            if let s = step.durationSeconds { return "Timer \(format(seconds: s))" }
-            return "Timer"
-        case .relativeToPrev:
-            if let s = step.offsetSeconds { return "Starts \(formatOffset(seconds: s)) after previous" }
-            return "Next step"
-        }
     }
 
     private func notificationID(stackID: UUID, stepID: UUID, index: Int) -> String {
@@ -193,18 +192,5 @@ final class UserNotificationScheduler: AlarmScheduling {
         let center = UNUserNotificationCenter.current()
         let delivered = await center.deliveredNotifications()
         return delivered.map(\.request.identifier).filter { $0.hasPrefix(prefix) }
-    }
-
-    private func format(seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        if h > 0 { return "\(h)h \(m)m" }
-        if m > 0 { return "\(m)m \(s)s" }
-        return "\(s)s"
-    }
-
-    private func formatOffset(seconds: Int) -> String {
-        seconds >= 0 ? "+\(format(seconds: seconds))" : "−\(format(seconds: -seconds))"
     }
 }

@@ -5,8 +5,6 @@
 //  Created by . . on 8/16/25.
 //
 
-#if canImport(AlarmKit)
-
 import Foundation
 import SwiftData
 import SwiftUI
@@ -14,9 +12,7 @@ import AlarmKit
 import ActivityKit
 import AppIntents
 import os.log
-#if canImport(UIKit)
 import UIKit
-#endif
 
 @MainActor
 final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
@@ -62,7 +58,6 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     // MARK: - Colour helpers
 
     func colorFromHex(_ hex: String) -> SwiftUI.Color {
-        #if canImport(UIKit)
         let ui: UIColor = {
             var s = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             if s.hasPrefix("#") { s.removeFirst() }
@@ -87,32 +82,8 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             }
         }()
         return SwiftUI.Color(uiColor: ui)
-        #else
-        var s = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        if s.hasPrefix("#") { s.removeFirst() }
-        var v: UInt64 = 0
-        guard Scanner(string: s).scanHexInt64(&v) else {
-            return SwiftUI.Color(red: 0.23, green: 0.48, blue: 1.00, opacity: 1.0)
-        }
-        switch s.count {
-        case 6:
-            let r = Double((v >> 16) & 0xFF) / 255.0
-            let g = Double((v >>  8) & 0xFF) / 255.0
-            let b = Double( v        & 0xFF) / 255.0
-            return SwiftUI.Color(red: r, green: g, blue: b, opacity: 1.0)
-        case 8:
-            let r = Double((v >> 24) & 0xFF) / 255.0
-            let g = Double((v >> 16) & 0xFF) / 255.0
-            let b = Double((v >>  8) & 0xFF) / 255.0
-            let a = Double( v        & 0xFF) / 255.0
-            return SwiftUI.Color(red: r, green: g, blue: b, opacity: a)
-        default:
-            return SwiftUI.Color(red: 0.23, green: 0.48, blue: 1.00, opacity: 1.0)
-        }
-        #endif
     }
 
-    #if canImport(UIKit)
     private func hex(from color: SwiftUI.Color) -> String? {
         let ui = UIColor(color)
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
@@ -122,7 +93,6 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         let B = Int(round(b * 255))
         return String(format: "#%02X%02X%02X", R, G, B)
     }
-    #endif
 
     // MARK: - Permissions
 
@@ -183,17 +153,18 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
         // Resolve the active accent once for this pass and export for intents/widget.
         let tintNow = ThemeTintResolver.currentAccent()
-        #if canImport(UIKit)
         if let hexNow = hex(from: tintNow) {
             defaults.set(hexNow, forKey: "themeAccentHex")
             groupDefaults?.set(hexNow, forKey: "themeAccentHex")
         }
-        #endif
 
         // Track first enabled step’s nominal for offsets.
         var firstNominal: Date?
-        // Track earliest **effective** target for prearm plan.
+        // Track earliest **effective** target + details for LA prearm context.
         var earliestEffTarget: Date?
+        var earliestAlarmID: UUID?
+        var earliestStepTitle: String?
+        var earliestAllowSnooze: Bool = false
 
         for step in stack.sortedSteps where step.isEnabled {
             let nominalFireDate: Date
@@ -216,9 +187,16 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             let rawLead = max(0, nominalFireDate.timeIntervalSince(now))
             let seconds = max(minLead, Int(ceil(rawLead)))
             let effectiveTarget = now.addingTimeInterval(TimeInterval(seconds))
-            if earliestEffTarget == nil { earliestEffTarget = effectiveTarget }
 
             let id = UUID()
+
+            // Capture earliest effective target for LA prearm context.
+            if earliestEffTarget == nil {
+                earliestEffTarget = effectiveTarget
+                earliestAlarmID = id
+                earliestStepTitle = step.title
+                earliestAllowSnooze = step.allowSnooze
+            }
 
             // ——— Banner wording: concise & useful in small space ———
             let banner = LocalizedStringResource("Next: \(step.title)")
@@ -251,12 +229,10 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             defaults.set(step.title,        forKey: "ak.stepTitle.\(id.uuidString)")
             defaults.set(step.allowSnooze,  forKey: allowSnoozeKey(for: id))
 
-            #if canImport(UIKit)
             if let hx = hex(from: tintNow) {
                 defaults.set(hx, forKey: accentHexKey(for: id))
                 groupDefaults?.set(hx, forKey: accentHexKey(for: id))
             }
-            #endif
 
             defaults.set(stack.id.uuidString, forKey: stackIDKey(for: id))
             if let f = firstNominal {
@@ -299,6 +275,23 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
         if firstRun { hasScheduledOnceAK = true }
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
+
+        // 👉 Provide **flat** payload for LA prearm (no nested content:)
+        if let eff = earliestEffTarget,
+           let eid = earliestAlarmID,
+           let stepTitle = earliestStepTitle {
+            LiveActivityManager.recordPrearmContext(
+                .init(
+                    stackID: stack.id.uuidString,
+                    stackName: stack.name,
+                    stepTitle: stepTitle,
+                    ends: eff,
+                    allowSnooze: earliestAllowSnooze,
+                    alarmID: eid.uuidString,
+                    theme: ThemeMap.payload(for: "Default")
+                )
+            )
+        }
 
         // ✅ Prearm **once** for the earliest effective target (coalesced + throttled).
         if let eff = earliestEffTarget {
@@ -402,9 +395,22 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
                 DiagLog.log("[AK] adapter schedule id=\(uuid.uuidString) secs=\(seconds)s effTarget=\(DiagLog.f(target)) allowSnooze=\(allowSnooze)")
 
+                // 👉 Provide flat prearm payload so the gated prearm can bring up the LA.
+                let stackID = defaults.string(forKey: stackIDKey(for: uuid)) ?? ""
+                LiveActivityManager.recordPrearmContext(
+                    .init(
+                        stackID: stackID,
+                        stackName: stackName,
+                        stepTitle: stepTitle,
+                        ends: target,
+                        allowSnooze: allowSnooze,
+                        alarmID: uuid.uuidString,
+                        theme: ThemeMap.payload(for: "Default")
+                    )
+                )
+
                 // When adapter schedules ad-hoc, refresh the LA plan to the new near-term target.
-                await LiveActivityManager.prearmIfNeeded(stackID: defaults.string(forKey: stackIDKey(for: uuid)) ?? "",
-                                                         effTarget: target)
+                await LiveActivityManager.prearmIfNeeded(stackID: stackID, effTarget: target)
 
                 // 🔔 Inform widget about this ad-hoc schedule
                 ScheduleRevision.bump("adapterSchedule")
@@ -498,5 +504,3 @@ private func makeAttributes(alert: AlarmPresentation.Alert, tint: SwiftUI.Color)
         tintColor: tint
     )
 }
-
-#endif

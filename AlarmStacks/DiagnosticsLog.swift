@@ -182,7 +182,6 @@ enum LADiag {
 // MARK: - Live Activity smoke test (to separate OS quirks from app behaviour)
 
 /// Minimal attributes used only by the smoke test.
-/// NB: Name is **ASProbeAttributes** to avoid any clash with earlier debug files.
 struct ASProbeAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         var label: String
@@ -221,7 +220,7 @@ enum LADiagnostics {
         }
     }
 
-    /// One-shot Live Activity probe.
+    /// One-shot Live Activity probe (no visible UI unless you have a widget for ASProbeAttributes).
     @MainActor
     static func runSmokeTest() async -> LADiagnosticsReport {
         let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
@@ -276,6 +275,29 @@ enum LADiagnostics {
         let probe = Activity<ASProbeAttributes>.activities.count
         let ours  = Activity<AlarmActivityAttributes>.activities.count
         DiagLog.log("[LA SNAP] enabled=\(enabled) probeCount=\(probe) ourCount=\(ours)")
+    }
+
+    // MARK: Debug helpers to prove AlarmActivity works end-to-end
+
+    /// Force-start an AlarmActivity for 90s so you can see it running.
+    @MainActor
+    static func startDebugAlarmActivity() async {
+        let ends = Date().addingTimeInterval(90)
+        await LiveActivityController.shared.prearmOrUpdate(
+            stackID: "DEBUG-STACK",
+            stackName: "Debug Stack",
+            stepTitle: "Debug Step",
+            ends: ends,
+            allowSnooze: true,
+            alarmID: "debug-\(UUID().uuidString)",
+            theme: ThemeMap.payload(for: "Default")
+        )
+    }
+
+    /// End all AlarmActivities (debug).
+    @MainActor
+    static func endAllAlarmActivities() async {
+        await LiveActivityController.shared.endAll()
     }
 }
 
@@ -565,6 +587,19 @@ struct DiagnosticsLogView: View {
                     Button("LA Smoke Test") {
                         Task { @MainActor in
                             _ = await LADiagnostics.runSmokeTest()
+                            lines = DiagLog.read()
+                        }
+                    }
+                    Divider()
+                    Button("Start AlarmActivity (Debug, +90s)") {
+                        Task { @MainActor in
+                            await LADiagnostics.startDebugAlarmActivity()
+                            lines = DiagLog.read()
+                        }
+                    }
+                    Button("End All AlarmActivities") {
+                        Task { @MainActor in
+                            await LADiagnostics.endAllAlarmActivities()
                             lines = DiagLog.read()
                         }
                     }

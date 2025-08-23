@@ -64,6 +64,12 @@ private let RETRY_AFTER_TARGET: TimeInterval = 180 // keep trying up to +3m afte
 /// Foreground tick cadence to proactively start/update LAs while visible.
 private let FOREGROUND_TICK: TimeInterval = 30
 
+/// Bridge fallback: only create/update an LA when we’re very close.
+private let BRIDGE_PREARM_LEAD: TimeInterval = 90 // last 90s only
+
+/// The stack ID we’ll use for the bridge fallback LA.
+private let BRIDGE_STACK_ID = "bridge"
+
 @inline(__always)
 private func isAppActive() -> Bool {
     #if canImport(UIKit)
@@ -102,6 +108,18 @@ private func resolveStackIDFromAlarmID(_ alarmID: String) -> String? {
 final class LiveActivityManager {
 
     static let shared = LiveActivityManager()
+
+    /// Call this once early (e.g. App init) to register lifecycle observers
+    /// and start the foreground cadence immediately when active.
+    static func activate() {
+        let mgr = LiveActivityManager.shared
+        if isAppActive() {
+            Task { @MainActor in
+                await mgr._onDidBecomeActive()
+                await mgr.prearmFromBridgeIfNeeded() // immediate bridge prearm try
+            }
+        }
+    }
 
     #if canImport(UIKit)
     private var uiObservers: [NSObjectProtocol] = []
@@ -153,7 +171,6 @@ final class LiveActivityManager {
     deinit {
         #if canImport(UIKit)
         for obs in uiObservers { NotificationCenter.default.removeObserver(obs) }
-        // Class is @MainActor; deinit runs on the main actor, so invalidate directly.
         fgTimer?.invalidate()
         fgTimer = nil
         #endif
@@ -370,9 +387,6 @@ final class LiveActivityManager {
     static func markFiredNow(stackID: String, alarmID: String, firedAt: Date, ends: Date) {
         Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: nil) }
     }
-    static func markFiredNow(stackID: String, firedAt: Date, ends: Date, id: String? = nil, step: String? = nil) {
-        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: firedAt, ends: ends, stepTitle: step) }
-    }
     static func markFiredNow(stackIDFromAlarm id: String) {
         if let sid = resolveStackIDFromAlarmID(id) {
             Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: sid, alarmID: id, firedAt: Date(), ends: Date(), stepTitle: nil) }
@@ -481,8 +495,13 @@ final class LiveActivityManager {
             Task { @MainActor in
                 guard let self else { return }
                 let ids = self.allKnownStackIDs()
-                for sid in ids {
-                    await self.sync(stackID: sid, reason: "fg.tick")
+                if ids.isEmpty {
+                    // Fallback: when we don't know any stack IDs yet, try the bridge prearm.
+                    await self.prearmFromBridgeIfNeeded()
+                } else {
+                    for sid in ids {
+                        await self.sync(stackID: sid, reason: "fg.tick")
+                    }
                 }
             }
         }
@@ -503,8 +522,12 @@ final class LiveActivityManager {
         #endif
         // Prewarm on exit if the next step is within 45 minutes
         let ids = allKnownStackIDs()
-        for sid in ids {
-            await sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
+        if ids.isEmpty {
+            await prearmFromBridgeIfNeeded(now: .now) // try once on exit too
+        } else {
+            for sid in ids {
+                await sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
+            }
         }
     }
 
@@ -513,6 +536,8 @@ final class LiveActivityManager {
         for sid in Array(retryTasks.keys) {
             await sync(stackID: sid, reason: "retry.willEnterForeground")
         }
+        // Also try a bridge prearm in case we didn't have UD keys yet.
+        await prearmFromBridgeIfNeeded()
     }
 
     private func _onDidBecomeActive() async {
@@ -522,12 +547,61 @@ final class LiveActivityManager {
         #if canImport(UIKit)
         startForegroundTick()
         #endif
+        // Immediate bridge prearm attempt on activation.
+        await prearmFromBridgeIfNeeded()
     }
 
     private func _onProtectedDataAvailable() async {
         // Device just unlocked; try again for any pending stack (helps right after unlock).
         for sid in Array(retryTasks.keys) {
             await sync(stackID: sid, reason: "retry.protectedDataAvailable")
+        }
+        await prearmFromBridgeIfNeeded()
+    }
+
+    // MARK: - Bridge fallback prearm (ensures there is *some* LA near fire)
+
+    /// Uses NextAlarmBridge as a safety net to start/update an LA in the last ~90s
+    /// even if AlarmKit’s UD keys/stacks aren’t discoverable yet.
+    private func prearmFromBridgeIfNeeded(now: Date = .now) async {
+        let auth = ActivityAuthorizationInfo()
+        guard auth.areActivitiesEnabled else { return }
+
+        guard let info = NextAlarmBridge.read() else { return }
+        let remain = info.fireDate.timeIntervalSince(now)
+        guard remain > 0, remain <= BRIDGE_PREARM_LEAD else { return }
+
+        // Update existing bridge LA or create a new one.
+        if let a = Activity<AlarmActivityAttributes>.activities.first(where: { $0.attributes.stackID == BRIDGE_STACK_ID }) {
+            var st = a.content.state
+            st.stackName   = info.stackName
+            st.stepTitle   = info.stepTitle
+            st.ends        = info.fireDate
+            st.allowSnooze = false
+            st.alarmID     = "" // unknown/not needed for display
+            await a.update(ActivityContent(state: st, staleDate: nil))
+            MiniDiag.log("[ACT] bridge.update step=\(st.stepTitle) ends=\(st.ends)")
+            LADiag.logTimer(whereFrom: "bridge.update", start: nil, end: st.ends)
+        } else {    
+            let st = AlarmActivityAttributes.ContentState(
+                stackName: info.stackName,
+                stepTitle: info.stepTitle,
+                ends: info.fireDate,
+                allowSnooze: false,
+                alarmID: "",
+                firedAt: nil
+            )
+            do {
+                _ = try Activity.request(
+                    attributes: AlarmActivityAttributes(stackID: BRIDGE_STACK_ID),
+                    content: ActivityContent(state: st, staleDate: nil),
+                    pushType: nil
+                )
+                MiniDiag.log("[ACT] bridge.start step=\(st.stepTitle) ends=\(st.ends)")
+                LADiag.logTimer(whereFrom: "bridge.start", start: nil, end: st.ends)
+            } catch {
+                MiniDiag.log("[ACT] bridge.start FAILED error=\(error.localizedDescription)")
+            }
         }
     }
 }
