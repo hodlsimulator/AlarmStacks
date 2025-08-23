@@ -148,13 +148,11 @@ struct AlarmStacksApp: App {
             }
         }
         .modelContainer(for: [Stack.self, Step.self])
-        // Foreground pass using the new iOS 17+ onChange two-parameter variant.
-        .onChange(of: scenePhase) { _, newPhase in
+        // Foreground pass using the iOS 17+ two-parameter variant — must specify `initial:`
+        .onChange(of: scenePhase, initial: false) { oldPhase, newPhase in
             if newPhase == .active {
                 Task { @MainActor in
                     AppLifecycleSanitiser.foregroundPass()
-                    // Drain any queued Live Activity prearm attempts now that we're active.
-                    LiveActivityManager.drainForegroundQueue()
                 }
             }
         }

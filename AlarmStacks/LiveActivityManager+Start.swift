@@ -5,7 +5,6 @@
 //  Created by . . on 8/22/25.
 //
 
-
 import Foundation
 import ActivityKit
 #if canImport(UIKit)
@@ -20,7 +19,7 @@ extension LiveActivityManager {
     @MainActor
     static func ensureFromAppGroup(stackID: String) async {
         guard isActive else {
-            MiniDiag.log("[ACT] ensure.skip (not active) stack=\(stackID)")
+            DiagLog.log("[ACT] ensure.skip (not active) stack=\(stackID)")
             return
         }
         await refreshFromGroup(stackID: stackID, excludeID: nil)
@@ -30,11 +29,11 @@ extension LiveActivityManager {
     @MainActor
     static func ensureFromStack(_ maybeStack: Any?) async {
         guard isActive else {
-            MiniDiag.log("[ACT] start.skip (not active)")
+            DiagLog.log("[ACT] start.skip (not active)")
             return
         }
         guard let sid = extractStackID(maybeStack) else {
-            MiniDiag.log("[ACT] start WARN could not extract stackID from Stack")
+            DiagLog.log("[ACT] start WARN could not extract stackID from Stack")
             return
         }
         await refreshFromGroup(stackID: sid, excludeID: nil)
@@ -44,9 +43,16 @@ extension LiveActivityManager {
     @MainActor
     static func startOrUpdateIfNeeded(forStackID stackID: String) async {
         guard isActive else {
-            MiniDiag.log("[ACT] ensure.skip (not active) stack=\(stackID)")
+            DiagLog.log("[ACT] ensure.skip (not active) stack=\(stackID)")
             return
         }
+        await refreshFromGroup(stackID: stackID, excludeID: nil)
+    }
+
+    /// ⬅️ Renamed to avoid colliding with the shim in LiveActivityManager.swift
+    /// Called by the pre-arm gate.
+    @MainActor
+    static func attemptStartNow(stackID: String, calendar: Calendar = .current) async {
         await refreshFromGroup(stackID: stackID, excludeID: nil)
     }
 
@@ -54,6 +60,16 @@ extension LiveActivityManager {
 
     @MainActor
     private static func refreshFromGroup(stackID: String, excludeID: String?) async {
+        // Local kill-switch or OS disabled → bail early.
+        if LAFlags.deviceDisabled {
+            DiagLog.log("[ACT] refresh.skip (device disabled) stack=\(stackID)")
+            return
+        }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            DiagLog.log("[ACT] refresh.skip (LA disabled by OS) stack=\(stackID)")
+            return
+        }
+
         let ids = LAUD.rStringArray(LA.storageKey(forStackID: stackID))
         let now = Date()
 
@@ -65,7 +81,8 @@ extension LiveActivityManager {
             if let a = existing {
                 let st = a.content.state
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
+                DiagLog.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
+                LADiag.logAuthAndActive(from: "end.noTracked", stackID: stackID, expectingAlarmID: nil)
             }
             return
         }
@@ -118,7 +135,8 @@ extension LiveActivityManager {
             if let a = existing {
                 let st = a.content.state
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-future → end")
+                DiagLog.log("[ACT] refresh.end stack=\(stackID) no-future → end")
+                LADiag.logAuthAndActive(from: "end.noFuture", stackID: stackID, expectingAlarmID: nil)
             }
             return
         }
@@ -129,9 +147,9 @@ extension LiveActivityManager {
             if let a = existing {
                 let st = a.content.state
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+                DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
             } else {
-                MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
+                DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
             }
             return
         }
@@ -140,7 +158,7 @@ extension LiveActivityManager {
         let currentTheme = existing?.content.state.theme
         var newState = AlarmActivityAttributes.ContentState(
             stackName: chosen.stackName,
-            stepTitle: chosen.stepTitle,
+            stepTitle: chosen.stepTitle,        // UI copy for LA is handled in the widget; here we pass the raw step name.
             ends: chosen.date,
             allowSnooze: chosen.allowSnooze,
             alarmID: chosen.id,
@@ -152,15 +170,16 @@ extension LiveActivityManager {
             // Skip churn if identical
             let st = a.content.state
             if st.stackName == newState.stackName &&
-                st.stepTitle == newState.stepTitle &&
-                st.ends == newState.ends &&
-                st.allowSnooze == newState.allowSnooze &&
-                st.firedAt == nil &&
-                st.alarmID == newState.alarmID {
+               st.stepTitle == newState.stepTitle &&
+               st.ends == newState.ends &&
+               st.allowSnooze == newState.allowSnooze &&
+               st.firedAt == nil &&
+               st.alarmID == newState.alarmID {
                 return
             }
             await a.update(ActivityContent(state: newState, staleDate: nil))
-            MiniDiag.log("[ACT] refresh.update stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+            DiagLog.log("[ACT] refresh.update stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+            LADiag.logAuthAndActive(from: "update.ok", stackID: stackID, expectingAlarmID: newState.alarmID)
         } else {
             do {
                 _ = try Activity.request(
@@ -168,9 +187,20 @@ extension LiveActivityManager {
                     content: ActivityContent(state: newState, staleDate: nil),
                     pushType: nil
                 )
-                MiniDiag.log("[ACT] refresh.start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+                DiagLog.log("[ACT] refresh.start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+                LADiag.logAuthAndActive(from: "start.ok", stackID: stackID, expectingAlarmID: newState.alarmID)
             } catch {
-                MiniDiag.log("[ACT] refresh request failed stack=\(stackID) error=\(error)")
+                let es = String(describing: error)
+                DiagLog.log("[ACT] refresh request failed stack=\(stackID) error=\(es)")
+                LADiag.logAuthAndActive(from: "start.failed", stackID: stackID, expectingAlarmID: newState.alarmID)
+
+                // Typical transient errors we should back off from.
+                if es.contains("targetMaximumExceeded") {
+                    beginCooldown(seconds: 10 * 60, reason: "targetMaximumExceeded")
+                } else if es.contains("visibility") {
+                    // Schedule a first-lock/background retry (installed by LiveActivityVisibilityRetry).
+                    LiveActivityVisibilityRetry.enqueue(stackID: stackID, reason: "visibility")
+                }
             }
         }
     }

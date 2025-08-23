@@ -150,12 +150,15 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     func schedule(stack: Stack, calendar: Calendar = .current) async throws -> [String] {
         try await requestAuthorizationIfNeeded()
 
+        // Cancel any prior LA prearm plan for this stack — we'll install a fresh one below.
+        LiveActivityManager.cancelPrearm(for: stack.id.uuidString)
+
         // If something is about to fire within the protected window, keep current schedules
-        // but make sure the Live Activity shows the actual pending target.
+        // but make sure the Live Activity shows the actual pending target (with gated retries).
         if let imminent = nextEnabledStepFireDate(for: stack, calendar: calendar),
            imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
             DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
-            LiveActivityManager.start(stackID: stack.id.uuidString, calendar: calendar)
+            await LiveActivityManager.prearmIfNeeded(stackID: stack.id.uuidString, effTarget: imminent, calendar: calendar)
             return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
@@ -187,9 +190,10 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         }
         #endif
 
-        // Track first enabled step’s nominal for offsets + prearm only once
+        // Track first enabled step’s nominal for offsets.
         var firstNominal: Date?
-        var didPrearm = false
+        // Track earliest **effective** target for prearm plan.
+        var earliestEffTarget: Date?
 
         for step in stack.sortedSteps where step.isEnabled {
             let nominalFireDate: Date
@@ -212,17 +216,14 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             let rawLead = max(0, nominalFireDate.timeIntervalSince(now))
             let seconds = max(minLead, Int(ceil(rawLead)))
             let effectiveTarget = now.addingTimeInterval(TimeInterval(seconds))
-
-            // 🔹 Prearm LA for the *first* enabled step so the activity is ready.
-            if !didPrearm {
-                LiveActivityManager.ensurePrearmed(stackID: stack.id.uuidString, effTarget: effectiveTarget)
-                didPrearm = true
-            }
+            if earliestEffTarget == nil { earliestEffTarget = effectiveTarget }
 
             let id = UUID()
 
-            let title: LocalizedStringResource = LocalizedStringResource("\(stack.name) — \(step.title)")
-            let alert = makeAlert(title: title, allowSnooze: step.allowSnooze)
+            // ——— Banner wording: concise & useful in small space ———
+            let banner = LocalizedStringResource("Next: \(step.title)")
+
+            let alert = makeAlert(title: banner, allowSnooze: step.allowSnooze)
             let attrs  = makeAttributes(alert: alert, tint: tintNow)
             let sound  = resolveSound(forStepName: step.soundName)
 
@@ -299,8 +300,12 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         if firstRun { hasScheduledOnceAK = true }
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
 
-        // ✅ Confirm/update LA **after** scheduling so it picks up the near-term effective targets.
-        LiveActivityManager.start(stackID: stack.id.uuidString, calendar: calendar)
+        // ✅ Prearm **once** for the earliest effective target (coalesced + throttled).
+        if let eff = earliestEffTarget {
+            await LiveActivityManager.prearmIfNeeded(stackID: stack.id.uuidString, effTarget: eff, calendar: calendar)
+        } else {
+            LiveActivityManager.cancelPrearm(for: stack.id.uuidString)
+        }
 
         // 🔔 SINGLE place to signal chain change to widget + logs
         ScheduleRevision.bump("chainShift")
@@ -309,6 +314,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     }
 
     func cancelAll(for stack: Stack) async {
+        // Also cancel any prearm plan for this stack to avoid stray start attempts.
+        LiveActivityManager.cancelPrearm(for: stack.id.uuidString)
+
         let key = storageKey(for: stack)
         for s in (defaults.stringArray(forKey: key) ?? []) {
             if let id = UUID(uuidString: s) {
@@ -347,7 +355,8 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             return ThemeTintResolver.currentAccent()
         }()
 
-        let alert = makeAlert(title: LocalizedStringResource("\(stackName) — \(stepTitle)"), allowSnooze: allowSnooze)
+        // Concise banner again.
+        let alert = makeAlert(title: LocalizedStringResource("Next: \(stepTitle)"), allowSnooze: allowSnooze)
         let attrs = makeAttributes(alert: alert, tint: tint)
         let sound = resolveSound(forStepName: soundName)
 
@@ -392,6 +401,10 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
                 )
 
                 DiagLog.log("[AK] adapter schedule id=\(uuid.uuidString) secs=\(seconds)s effTarget=\(DiagLog.f(target)) allowSnooze=\(allowSnooze)")
+
+                // When adapter schedules ad-hoc, refresh the LA plan to the new near-term target.
+                await LiveActivityManager.prearmIfNeeded(stackID: defaults.string(forKey: stackIDKey(for: uuid)) ?? "",
+                                                         effTarget: target)
 
                 // 🔔 Inform widget about this ad-hoc schedule
                 ScheduleRevision.bump("adapterSchedule")

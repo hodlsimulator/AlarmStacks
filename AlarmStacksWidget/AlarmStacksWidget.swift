@@ -14,7 +14,7 @@ import ActivityKit
 import UIKit
 #endif
 
-// MARK: - Shared bridge model
+// MARK: - Shared bridge model (static widget)
 struct NextAlarmEntry: TimelineEntry {
     let date: Date
     let info: NextAlarmInfo?
@@ -183,12 +183,9 @@ private enum LAViewLogger {
     /// Throttled log of exactly what the LA is showing.
     static func logRender(surface: String, state: AlarmActivityAttributes.ContentState) {
         let now = Date()
-        let isRinging = (state.firedAt != nil) // ← status is based ONLY on firedAt
         let mode: String
         var bucket = 0
-        if let fired = state.firedAt {
-            mode = "clock(firedAt=\(fmt.string(from: fired)))"
-        } else if state.ends > now {
+        if state.ends > now {
             let remain = Int(round(state.ends.timeIntervalSince(now)))
             bucket = max(0, remain / 30) // 30s buckets
             mode = "timer(remaining=\(remain)s)"
@@ -196,104 +193,27 @@ private enum LAViewLogger {
             mode = "time(ends=\(fmt.string(from: state.ends)))"
         }
 
-        // Throttle by alarmID + surface + status + bucket.
-        let sig = "\(state.alarmID)|\(surface)|\(isRinging ? "R" : "N")|\(mode)|\(bucket)"
+        // Throttle by alarmID + surface + bucket.
+        let sig = "\(state.alarmID)|\(surface)|\(mode)|\(bucket)"
         let sigKey = "la.lastsig.\(state.alarmID).\(surface)"
         let ud = UserDefaults(suiteName: AppGroups.main)
         let last = ud?.string(forKey: sigKey)
         if last == sig { return }
         ud?.set(sig, forKey: sigKey)
 
-        append("[LA] render surface=\(surface) stack=\(state.stackName) step=\(state.stepTitle) status=\(isRinging ? "Ringing" : "Next") mode=\(mode) ends=\(fmt.string(from: state.ends)) now=\(fmt.string(from: now)) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
+        append("[LA] render surface=\(surface) stack=\(state.stackName) step=\(state.stepTitle) status=Next mode=\(mode) ends=\(fmt.string(from: state.ends)) now=\(fmt.string(from: now)) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
     }
 }
 
-// MARK: - Live Activity (no Stop/Snooze actions on bubble)
+// MARK: - Small accent glyph (stroke-only, no opaque fill)
 
-private struct AlarmActivityLockRoot: View {
-    let context: ActivityViewContext<AlarmActivityAttributes>
-    @Environment(\.colorScheme) private var scheme
-
-    private var accent: Color { context.state.theme.accent.color }
-
-    // Ultra-light glass tint to match system notifications.
-    private var glassTint: Color {
-        #if canImport(UIKit)
-        let base = (scheme == .dark ? context.state.theme.bgDark.color : context.state.theme.bgLight.color)
-        let alpha: CGFloat = (scheme == .dark) ? 0.06 : 0.05
-        return Color(UIColor(base).withAlphaComponent(alpha))
-        #else
-        return (scheme == .dark)
-            ? Color(.sRGB, red: 1, green: 1, blue: 1, opacity: 0.06)
-            : Color(.sRGB, red: 0, green: 0, blue: 0, opacity: 0.05)
-        #endif
-    }
-
-    /// “Ringing” is ONLY when the engine has set `firedAt`.
-    private var isRinging: Bool { context.state.firedAt != nil }
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Row: Glyph + titles + right-rail timer
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                GlassGlyph(accent: accent)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    StatusChip(text: isRinging ? "Ringing" : "Next step")
-                    Text(context.state.stackName)
-                        .font(.title3.weight(.semibold))
-                        .fontDesign(.rounded)
-                        .singleLineTightTail()
-                    Text(context.state.stepTitle)
-                        .font(.body)
-                        .fontDesign(.rounded)
-                        .foregroundStyle(.secondary)
-                        .singleLineTightTail()
-                }
-
-                Spacer(minLength: 8)
-
-                Group {
-                    if let fired = context.state.firedAt {
-                        Text(fired, style: .time).monospacedDigit()
-                    } else if context.state.ends > Date() {
-                        Text(context.state.ends, style: .timer).monospacedDigit()
-                    } else {
-                        Text(context.state.ends, style: .time).monospacedDigit()
-                    }
-                }
-                .font(.title.weight(.bold))
-                .minimumScaleFactor(0.7)
-                .lineLimit(1)
-                .multilineTextAlignment(.trailing)
-            }
-            // No Stop/Snooze action row here by design.
-        }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 14)
-        .tint(accent)                              // glyph picks up theme accent
-        .activityBackgroundTint(glassTint)         // super transparent glass
-        .activitySystemActionForegroundColor(.primary)
-        .widgetURL(URL(string: "alarmstacks://activity/open"))
-        .onAppear {
-            LAViewLogger.logRender(surface: "lock", state: context.state)
-        }
-        .onChange(of: context.state) { _, newState in
-            LAViewLogger.logRender(surface: "lock", state: newState)
-        }
-    }
-}
-
-// Accent glyph with subtle glass ring (stroke-only, no opaque fill).
 private struct GlassGlyph: View {
     let accent: Color
     var body: some View {
         ZStack {
             Circle()
                 .strokeBorder(accent.opacity(0.28), lineWidth: 1.5)
-                .overlay(
-                    Circle().strokeBorder(.white.opacity(0.08), lineWidth: 1)
-                )
+                .overlay(Circle().strokeBorder(.white.opacity(0.08), lineWidth: 1))
                 .frame(width: 34, height: 34)
             Image(systemName: "alarm.fill")
                 .imageScale(.medium)
@@ -304,11 +224,10 @@ private struct GlassGlyph: View {
     }
 }
 
-// Small glassy status capsule (“Ringing” / “Next step”), stroke only.
+// Small glassy status capsule (always “Next step”)
 private struct StatusChip: View {
-    let text: String
     var body: some View {
-        Text(text.uppercased())
+        Text("NEXT STEP")
             .font(.caption2.weight(.semibold))
             .tracking(0.8)
             .padding(.horizontal, 8)
@@ -325,6 +244,58 @@ private struct StatusChip: View {
     }
 }
 
+// MARK: - Live Activity (Lock screen root)
+
+private struct AlarmActivityLockRoot: View {
+    let context: ActivityViewContext<AlarmActivityAttributes>
+
+    /// Always present the next step + countdown (never “Ringing” text).
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                GlassGlyph(accent: context.state.theme.accent.color)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    StatusChip()
+                    Text(context.state.stackName)
+                        .font(.title3.weight(.semibold))
+                        .fontDesign(.rounded)
+                        .singleLineTightTail()
+                    Text(context.state.stepTitle)
+                        .font(.body)
+                        .fontDesign(.rounded)
+                        .foregroundStyle(.secondary)
+                        .singleLineTightTail()
+                }
+
+                Spacer(minLength: 8)
+
+                // Prefer countdown; fall back to absolute time if we’re at/past ends.
+                Group {
+                    if context.state.ends > Date() {
+                        Text(context.state.ends, style: .timer).monospacedDigit()
+                    } else {
+                        Text(context.state.ends, style: .time).monospacedDigit()
+                    }
+                }
+                .font(.title.weight(.bold))
+                .minimumScaleFactor(0.7)
+                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
+            }
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 14)
+        .applyLiveActivityTheme()                   // <- theme/tints live here
+        .activitySystemActionForegroundColor(.primary)
+        .widgetURL(URL(string: "alarmstacks://activity/open"))
+        .onAppear { LAViewLogger.logRender(surface: "lock", state: context.state) }
+        .onChange(of: context.state) { _, newState in
+            LAViewLogger.logRender(surface: "lock", state: newState)
+        }
+    }
+}
+
 // MARK: - Activity + Island
 
 struct AlarmActivityWidget: Widget {
@@ -333,7 +304,6 @@ struct AlarmActivityWidget: Widget {
             AlarmActivityLockRoot(context: context)
         } dynamicIsland: { context in
             let accent = context.state.theme.accent.color
-            let isRinging = (context.state.firedAt != nil) // ← same rule
 
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -342,7 +312,7 @@ struct AlarmActivityWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        StatusChip(text: isRinging ? "Ringing" : "Next step")
+                        StatusChip()
                         Text(context.state.stackName)
                             .font(.headline.weight(.semibold))
                             .fontDesign(.rounded)
@@ -359,15 +329,12 @@ struct AlarmActivityWidget: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    // Intentionally empty: no Stop/Snooze icons.
-                    EmptyView()
+                    EmptyView() // no Stop/Snooze icons in the island
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
                         Group {
-                            if let fired = context.state.firedAt {
-                                Text(fired, style: .time).monospacedDigit()
-                            } else if context.state.ends > Date() {
+                            if context.state.ends > Date() {
                                 Text(context.state.ends, style: .timer)
                                     .monospacedDigit()
                                     .minimumScaleFactor(0.7)
@@ -385,9 +352,7 @@ struct AlarmActivityWidget: Widget {
                     .onAppear { LAViewLogger.logRender(surface: "island.compactLeading", state: context.state) }
             } compactTrailing: {
                 Group {
-                    if let fired = context.state.firedAt {
-                        Text(fired, style: .time).monospacedDigit()
-                    } else if context.state.ends > Date() {
+                    if context.state.ends > Date() {
                         Text(context.state.ends, style: .timer).monospacedDigit()
                     } else {
                         Text(context.state.ends, style: .time).monospacedDigit()

@@ -66,7 +66,6 @@ enum DiagLog {
         f.calendar = Calendar(identifier: .iso8601)
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = .current
-        // Correct: fractional seconds use 'S', not 'f'
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"   // e.g. 2025-08-20 16:10:06.726 +01:00
         return f
     }()
@@ -162,24 +161,121 @@ enum LADiag {
         DiagLog.log("[ACT] state from=\(whereFrom) stack=\(stackID ?? "-") auth.enabled=\(enabled ? "y" : "n") active.count=\(acts.count) active{\(summary)} expecting=\(expectingAlarmID ?? "-") seen=\(seenExpected)")
     }
 
-    /// Timer direction diagnostic. Reports whether LA is counting **down** to `end`
-    /// or **up** from `start` (if provided). Mirrors the strings you’re seeing in the log.
+    /// Timer direction diagnostic.
     static func logTimer(whereFrom: String, start: Date?, end: Date, now: Date = Date()) {
         if let start {
-            // If we have a start, treat it as “ringing” (count up).
             let elapsed = max(0, now.timeIntervalSince(start))
             DiagLog.log(String(
                 format: "[ACT] timer where=%@ dir=up start=%@ end=%@ now=%@ remain=- elapsed=%.3fs",
                 whereFrom, DiagLog.f(start), DiagLog.f(end), DiagLog.f(now), elapsed
             ))
         } else {
-            // No start → pre-ring (count down).
             let remain = max(0, end.timeIntervalSince(now))
             DiagLog.log(String(
                 format: "[ACT] timer where=%@ dir=down start=- end=%@ now=%@ remain=%.3fs elapsed=-s",
                 whereFrom, DiagLog.f(end), DiagLog.f(now), remain
             ))
         }
+    }
+}
+
+// MARK: - Live Activity smoke test (to separate OS quirks from app behaviour)
+
+/// Minimal attributes used only by the smoke test.
+/// NB: Name is **ASProbeAttributes** to avoid any clash with earlier debug files.
+struct ASProbeAttributes: ActivityAttributes {
+    struct ContentState: Codable, Hashable {
+        var label: String
+        var ends: Date
+    }
+    init() {}
+}
+
+struct LADiagnosticsReport: Sendable {
+    let timestamp: Date
+    let areActivitiesEnabled: Bool
+    let requestSucceeded: Bool
+    let requestError: String?
+    let probeCountAfter: Int
+    let ourTypeCountAfter: Int
+    let startedButNotListed: Bool
+
+    var summary: String {
+        """
+        [LA DIAG] time=\(DiagLog.f(timestamp)) enabled=\(areActivitiesEnabled) \
+        request.ok=\(requestSucceeded) error=\(requestError ?? "-") \
+        probe.after=\(probeCountAfter) our.after=\(ourTypeCountAfter) \
+        startedButNotListed=\(startedButNotListed)
+        """
+    }
+}
+
+enum LADiagnostics {
+
+    /// End any leftover probe activities from prior runs.
+    @MainActor
+    static func cleanupProbes() async {
+        for a in Activity<ASProbeAttributes>.activities {
+            let content = ActivityContent(state: a.content.state, staleDate: nil)
+            await a.end(content, dismissalPolicy: ActivityUIDismissalPolicy.immediate)
+        }
+    }
+
+    /// One-shot Live Activity probe.
+    @MainActor
+    static func runSmokeTest() async -> LADiagnosticsReport {
+        let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
+
+        await cleanupProbes()
+
+        var ok = false
+        var err: String? = nil
+
+        do {
+            let attrs = ASProbeAttributes()
+            let state = ASProbeAttributes.ContentState(label: "Probe", ends: Date().addingTimeInterval(120))
+            let content = ActivityContent(state: state, staleDate: nil)
+            _ = try Activity<ASProbeAttributes>.request(
+                attributes: attrs,
+                content: content,
+                pushType: nil
+            )
+            ok = true
+        } catch {
+            ok = false
+            err = "\(error)"
+        }
+
+        // Give the framework a beat to register the request.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        let probeAfter = Activity<ASProbeAttributes>.activities.count
+        let ourAfter   = Activity<AlarmActivityAttributes>.activities.count
+
+        // Clean up probe(s).
+        await cleanupProbes()
+
+        let report = LADiagnosticsReport(
+            timestamp: Date(),
+            areActivitiesEnabled: enabled,
+            requestSucceeded: ok,
+            requestError: err,
+            probeCountAfter: probeAfter,
+            ourTypeCountAfter: ourAfter,
+            startedButNotListed: (ok && probeAfter == 0)
+        )
+
+        DiagLog.log(report.summary)
+        return report
+    }
+
+    /// Quick counts/enablement snapshot without creating anything.
+    @MainActor
+    static func quickSnapshot() {
+        let enabled = ActivityAuthorizationInfo().areActivitiesEnabled
+        let probe = Activity<ASProbeAttributes>.activities.count
+        let ours  = Activity<AlarmActivityAttributes>.activities.count
+        DiagLog.log("[LA SNAP] enabled=\(enabled) probeCount=\(probe) ourCount=\(ours)")
     }
 }
 
@@ -194,8 +290,6 @@ enum AKDiag {
     enum Kind: String, Codable { case step, snooze, test }
 
     /// One record per scheduled AK alarm (step, snooze, or test).
-    /// `targetDate`/`targetUptime` are the **effective** timer target (now + `seconds`).
-    /// `nominalDate` (optional) is the calendar time we *wanted* (e.g. :00 step time).
     struct Record: Codable {
         // Base fields
         var stackName: String
@@ -300,7 +394,7 @@ enum AKDiag {
         return (wallDelta, upDelta)
     }
 
-    /// Δ relative to the **nominal** (calendar) target, if known.
+    /// Δ relative to the **nominal** target, if known.
     static func nominalDeltaAtAlert(using rec: Record,
                                     nowWall: Date = Date()) -> Double? {
         guard let nd = rec.nominalDate else { return nil }
@@ -459,6 +553,20 @@ struct DiagnosticsLogView: View {
                     }
                     Button("Refresh CSV Preview") {
                         csv = AKDiag.exportCSV()
+                    }
+                }
+                Menu("LA Tools") {
+                    Button("LA Snapshot") {
+                        Task { @MainActor in
+                            LADiagnostics.quickSnapshot()
+                            lines = DiagLog.read()
+                        }
+                    }
+                    Button("LA Smoke Test") {
+                        Task { @MainActor in
+                            _ = await LADiagnostics.runSmokeTest()
+                            lines = DiagLog.read()
+                        }
                     }
                 }
             }
