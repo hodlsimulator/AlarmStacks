@@ -37,34 +37,6 @@ private func snoozeMinutesKey(for id: UUID) -> String { "ak.snoozeMinutes.\(id.u
 private func stackNameKey(for id: UUID) -> String { "ak.stackName.\(id.uuidString)" }
 private func stepTitleKey(for id: UUID) -> String { "ak.stepTitle.\(id.uuidString)" }
 
-// MARK: - Mini diagnostics (same sink key as app)
-
-@MainActor
-private enum MiniDiag {
-    private static let key = "diag.log.lines"
-    private static let maxLines = 2000
-
-    private static let local: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .iso8601)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"
-        return f
-    }()
-
-    static func log(_ message: String) {
-        let now = Date()
-        let up  = ProcessInfo.processInfo.systemUptime
-        let stamp = "\(local.string(from: now)) | up:\(String(format: "%.3f", up))s"
-        let line = "[\(stamp)] \(message)"
-        var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
-        lines.append(line)
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
-        UserDefaults.standard.set(lines, forKey: key)
-    }
-}
-
 // MARK: - Local revision bump (App Group)
 
 @MainActor
@@ -152,6 +124,7 @@ private enum UD {
 private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2 hours
 
 // MARK: - Minimal LA refresh (local, avoids depending on LiveActivityManager type)
+// Also integrates the defer-until-lock policy for brand-new Activity starts.
 
 @MainActor
 private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = nil) async {
@@ -251,8 +224,8 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
     )
     if let theme = currentTheme { newState.theme = theme }
 
-    // If nothing changed, skip to avoid churn.
     if let a = existing {
+        // If nothing changed, skip to avoid churn.
         let st = a.content.state
         if st.stackName == newState.stackName &&
             st.stepTitle == newState.stepTitle &&
@@ -265,15 +238,25 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
         await a.update(ActivityContent(state: newState, staleDate: nil))
         MiniDiag.log("[ACT] refresh.update stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
     } else {
-        do {
-            _ = try Activity.request(
-                attributes: AlarmActivityAttributes(stackID: stackID),
-                content: ActivityContent(state: newState, staleDate: nil),
-                pushType: nil
-            )
-            MiniDiag.log("[ACT] refresh.start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
-        } catch {
-            MiniDiag.log("[ACT] refresh request failed stack=\(stackID) error=\(error)")
+        // NEW activity start: gate with defer-until-lock if we’re foreground & near.
+        await LiveActivityVisibilityRetry.shared.maybeDeferOrRun(
+            stackID: stackID,
+            nextFire: chosen.date
+        ) {
+            await MainActor.run {
+                do {
+                    _ = try Activity.request(
+                        attributes: AlarmActivityAttributes(stackID: stackID),
+                        content: ActivityContent(state: newState, staleDate: nil),
+                        pushType: nil
+                    )
+                    MiniDiag.log("[ACT] start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
+                } catch {
+                    // Retry on first lock/background.
+                    MiniDiag.log("[ACT] start FAILED stack=\(stackID) error=\(error)")
+                    LiveActivityVisibilityRetry.enqueue(stackID: stackID, reason: "visibility")
+                }
+            }
         }
     }
 }
@@ -415,8 +398,19 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
             UD.remove(snoozeMapKey(for: baseID))
         }
 
-        // Schedule the snooze timer
+        // Prepare metadata BEFORE scheduling so LA/diagnostics never see a missing effTarget.
         let snoozeID = UUID()
+        UD.set(newBase.timeIntervalSince1970, forKey: effTargetKey(for: snoozeID))
+        UD.set(stackName,  forKey: stackNameKey(for: snoozeID))
+        UD.set(stepTitle,  forKey: stepTitleKey(for: snoozeID))
+        if let n = carriedName, !n.isEmpty { UD.set(n, forKey: soundKey(for: snoozeID)) }
+        UD.set(hex,        forKey: accentHexKey(for: snoozeID))
+        UD.set(true,       forKey: allowSnoozeKey(for: snoozeID)) // snooze alert always re-snoozable
+        UD.set(stackID,    forKey: stackIDKey(for: snoozeID))
+        UD.set(0.0,        forKey: offsetFromFirstKey(for: snoozeID))
+        UD.set("timer",    forKey: kindKey(for: snoozeID))
+
+        // Schedule the snooze timer
         do {
             let cfg: AlarmManager.AlarmConfiguration<IntentsMetadata> = .timer(
                 duration: TimeInterval(snoozeSecs),
@@ -427,33 +421,18 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
             )
             _ = try await AlarmManager.shared.schedule(id: snoozeID, configuration: cfg)
         } catch {
+            // Clean pre-persisted keys if schedule actually failed.
+            cleanupMetadata(for: snoozeID)
             MiniDiag.log("AK snooze schedule FAILED base=\(baseID.uuidString) error=\(error)")
             return
         }
 
-        // Persist snooze metadata (effective target only)
-        UD.set(newBase.timeIntervalSince1970, forKey: effTargetKey(for: snoozeID))
-        UD.set(snoozeID.uuidString,          forKey: snoozeMapKey(for: baseID))
-        UD.set(minutes,                      forKey: snoozeMinutesKey(for: snoozeID))
-        UD.set(stackName,                    forKey: stackNameKey(for: snoozeID))
-        UD.set(stepTitle,                    forKey: stepTitleKey(for: snoozeID))
-        if let n = carriedName, !n.isEmpty { UD.set(n, forKey: soundKey(for: snoozeID)) }
-        UD.set(hex,                          forKey: accentHexKey(for: snoozeID))
-        UD.set(true,                         forKey: allowSnoozeKey(for: snoozeID)) // snooze alert always re-snoozable
+        // Map base -> snooze only after success.
+        UD.set(snoozeID.uuidString, forKey: snoozeMapKey(for: baseID))
 
-        // Snooze mapping for offsets
-        if isFirst {
-            UD.set(stackID, forKey: stackIDKey(for: snoozeID))
-            UD.set(0.0,     forKey: offsetFromFirstKey(for: snoozeID)) // becomes the new base
-            UD.set("timer", forKey: kindKey(for: snoozeID))
-        } else {
-            let newOffset = baseOffset + delta
-            UD.set(stackID,   forKey: stackIDKey(for: snoozeID))
-            UD.set(newOffset, forKey: offsetFromFirstKey(for: snoozeID))
-            UD.set("timer",   forKey: kindKey(for: snoozeID))
-        }
-
-        MiniDiag.log("AK snooze schedule base=\(baseID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(newBase) Δ=\(String(format: "%.3fs", delta)) baseOffset=\(String(format: "%.1fs", baseOffset)) isFirst=\(isFirst ? "y":"n")")
+        MiniDiag.log(
+            "AK snooze schedule base=\(baseID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(newBase) Δ=\(String(format: "%.3fs", delta)) baseOffset=\(String(format: "%.1fs", baseOffset)) isFirst=\(isFirst ? "y" : "n")"
+        )
 
         // Replace base in tracked list with snooze id, adjust successors
         await shiftChainAfterSnooze(stackID: stackID,
@@ -510,8 +489,10 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
             UD.set(baseOffset + delta, forKey: offsetFromFirstKey(for: baseID))
         }
 
-        MiniDiag.log(String(format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
-                            stackID, baseID.uuidString, snoozeID.uuidString, newBase.description, delta, baseOffset, baseIsFirst ? "y" : "n"))
+        MiniDiag.log(String(
+            format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
+            stackID, baseID.uuidString, snoozeID.uuidString, newBase.description, delta, baseOffset, baseIsFirst ? "y" : "n"
+        ))
 
         // Reschedule impacted steps
         for oldStr in tracked {
@@ -557,6 +538,21 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
 
             // Replacement schedule
             let newID = UUID()
+
+            // Pre-persist expected + effTarget and metadata so LA never sees blanks.
+            let effDate = Date().addingTimeInterval(TimeInterval(secs))
+            UD.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID))
+            UD.set(effDate.timeIntervalSince1970,    forKey: effTargetKey(for: newID))
+            UD.set(stackName,  forKey: stackNameKey(for: newID))
+            UD.set(stepTitle,  forKey: stepTitleKey(for: newID))
+            UD.set(allow,      forKey: allowSnoozeKey(for: newID))
+            UD.set(snoozeMins, forKey: snoozeMinutesKey(for: newID))
+            if let n = carried, !n.isEmpty { UD.set(n, forKey: soundKey(for: newID)) }
+            UD.set(hx, forKey: accentHexKey(for: newID))
+            UD.set(stackID,   forKey: stackIDKey(for: newID))
+            UD.set(newOffset, forKey: offsetFromFirstKey(for: newID))
+            UD.set("timer",   forKey: kindKey(for: newID))
+
             let stopBtn   = AlarmButton(text: LocalizedStringResource("Stop"),   textColor: .white, systemImageName: "stop.fill")
             let alert: AlarmPresentation.Alert = {
                 if allow {
@@ -591,26 +587,16 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
                 )
                 _ = try await AlarmManager.shared.schedule(id: newID, configuration: cfg)
 
-                // Persist new id metadata
-                UD.set(newNominal.timeIntervalSince1970, forKey: expectedKey(for: newID))
-                UD.set(stackName,  forKey: stackNameKey(for: newID))
-                UD.set(stepTitle,  forKey: stepTitleKey(for: newID))
-                UD.set(allow,      forKey: allowSnoozeKey(for: newID))
-                UD.set(snoozeMins, forKey: snoozeMinutesKey(for: newID))
-                if let n = carried, !n.isEmpty { UD.set(n, forKey: soundKey(for: newID)) }
-                UD.set(hx, forKey: accentHexKey(for: newID))
-
-                // Preserve mapping
-                UD.set(stackID,   forKey: stackIDKey(for: newID))
-                UD.set(newOffset, forKey: offsetFromFirstKey(for: newID))
-                UD.set(kind,      forKey: kindKey(for: newID))
-
-                // Swap id in tracked list
+                // Swap id in tracked list on success
                 if let i = tracked.firstIndex(of: oldStr) { tracked[i] = newID.uuidString }
                 UD.set(tracked, forKey: storageKey(forStackID: stackID))
 
-                MiniDiag.log("[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(String(format: "%.1fs", newOffset)) newTarget=\(newNominal) enforcedLead=\(enforcedStr) kind=\(kind) allowSnooze=\(allow)")
+                MiniDiag.log(
+                    "[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(String(format: "%.1fs", newOffset)) newTarget=\(newNominal) enforcedLead=\(enforcedStr) kind=timer allowSnooze=\(allow)"
+                )
             } catch {
+                // Clean the pre-persisted keys if the new schedule failed
+                cleanupMetadata(for: newID)
                 MiniDiag.log("[CHAIN] FAILED to reschedule prev=\(oldID.uuidString) error=\(error)")
             }
         }

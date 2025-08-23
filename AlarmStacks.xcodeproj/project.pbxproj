@@ -80,9 +80,9 @@
 		E125516D2E517E03009BE32A /* Exceptions for "AlarmStacks" folder in "AlarmStacksWidgetExtension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
-				AlarmControlIntents.swift,
 				AppGroups.swift,
 				LiveActivityTypes.swift,
+				MiniDiag.swift,
 				NextAlarmBridge.swift,
 				ThemePayload.swift,
 				"View+SingleLineTightTail.swift",

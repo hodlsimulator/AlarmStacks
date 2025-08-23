@@ -24,6 +24,7 @@ private struct _InWindowObserver: UIViewRepresentable {
     func makeUIView(context: Context) -> _WindowProbeView {
         let v = _WindowProbeView(frame: .zero)
         v.isHidden = true
+        v.isUserInteractionEnabled = false
         v.onChange = onChange
         return v
     }
@@ -56,4 +57,14 @@ public extension View {
     }
 }
 
+#else
+
+// Non-UIKit builds: provide a no-op so call sites still compile (e.g. previews/other platforms).
+public extension View {
+    func safeContextMenu<Menu: View>(@ViewBuilder _ menu: @escaping () -> Menu) -> some View {
+        self
+    }
+}
+
 #endif
+        

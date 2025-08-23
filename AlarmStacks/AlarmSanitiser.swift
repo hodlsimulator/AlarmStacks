@@ -8,14 +8,18 @@
 import Foundation
 import os.log
 
+/// Production-safe reconciler:
+/// - Never cancels alarms solely because they’re **untracked** (logs only).
+/// - Still cleans up broken/snooze-orphans/expired/old-generation.
+/// - Writes are MainActor-isolated to avoid Swift 6 concurrency warnings.
 @MainActor
 public final class AlarmSanitiser {
 
     public static let shared = AlarmSanitiser()
 
     public enum Mode {
-        case logOnly
-        case active
+        case logOnly   // never cancels (diagnostic)
+        case active    // cancels for safe reasons, but NOT for "untracked"
     }
 
     public enum Reason: String {
@@ -29,7 +33,8 @@ public final class AlarmSanitiser {
     /// You should set this once at app start.
     public var canceller: ((String) -> Void)?
 
-    /// Controls whether we actually cancel or just log.
+    /// Controls whether we actually cancel or just log. In Release we allow
+    /// cancellation for safe reasons (never for "untracked").
     public var mode: Mode = {
         #if DEBUG
         return .logOnly
@@ -145,11 +150,18 @@ public final class AlarmSanitiser {
             }
         }
 
+        // Safe/destructive reasons (allowed in .active)
         enqueue(brokenIDs, "broken")
         enqueue(snoozeOrphans, "snooze_orphan")
         enqueue(oldGenIDs, "old_generation")
-        enqueue(untrackedIDs, "untracked")
         enqueue(expiredIDs, "expired")
+
+        // NEVER destructive for "untracked" — log only.
+        if !untrackedIDs.isEmpty {
+            for id in untrackedIDs {
+                logSAN("untracked id=\(id) — NOT cancelling (log-only)")
+            }
+        }
 
         // 10) Apply (cancel + wipe)
         var cancelledIDs = Set<String>()
@@ -244,6 +256,8 @@ public final class AlarmSanitiser {
     private func keysUnion() -> Set<String> {
         var set = Set(std.dictionaryRepresentation().keys)
         if let grp {
+            // Note: dictionaryRepresentation() on group stores can log a harmless cfprefsd message
+            // on first access in some environments; this is acceptable for our diagnostic pass.
             set.formUnion(grp.dictionaryRepresentation().keys)
         }
         return set

@@ -2,10 +2,15 @@
 //  LiveActivityManager.swift
 //  AlarmStacks
 //
+//  Created by . . on 8/17/25.
+//
 
 import Foundation
 import ActivityKit
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Key helpers
 
@@ -19,33 +24,6 @@ private func stackNameKey(for id: UUID) -> String { "ak.stackName.\(id.uuidStrin
 private func stepTitleKey(for id: UUID) -> String { "ak.stepTitle.\(id.uuidString)" }
 private func expectedKey(for id: UUID) -> String { "ak.expected.\(id.uuidString)" }
 private func effTargetKey(for id: UUID) -> String { "ak.effTarget.\(id.uuidString)" }
-
-// MARK: - Diagnostics
-
-@MainActor
-private enum MiniDiag {
-    private static let key = "diag.log.lines"
-    private static let maxLines = 2000
-
-    private static let local: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = Calendar(identifier: .iso8601)
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"
-        return f
-    }()
-
-    static func log(_ message: String) {
-        let now = Date()
-        let up  = ProcessInfo.processInfo.systemUptime
-        let stamp = "\(local.string(from: now)) | up:\(String(format: "%.3f", up))s"
-        var lines = UserDefaults.standard.stringArray(forKey: key) ?? []
-        lines.append("[\(stamp)] \(message)")
-        if lines.count > maxLines { lines.removeFirst(lines.count - maxLines) }
-        UserDefaults.standard.set(lines, forKey: key)
-    }
-}
 
 // MARK: - Unified defaults (read Group first, then standard)
 
@@ -76,6 +54,13 @@ private enum UD {
 /// Don’t surface the LA if the earliest step is too far away (prevents “in 23h” flash).
 private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2h
 
+/// Retry/backoff for transient errors like `visibility` or `targetMaximumExceeded`
+private let RETRY_INITIAL_DELAY: TimeInterval = 15
+private let RETRY_MAX_DELAY: TimeInterval = 90
+
+/// Foreground tick cadence to proactively start/update LAs while we’re visible.
+private let FOREGROUND_TICK: TimeInterval = 30
+
 /// Try to pull a stackID string out of any object (e.g. your `Stack` model)
 private func extractStackIDString(from any: Any) -> String? {
     if let s = any as? String { return s }
@@ -105,7 +90,47 @@ private func resolveStackIDFromAlarmID(_ alarmID: String) -> String? {
 final class LiveActivityManager {
 
     static let shared = LiveActivityManager()
-    private init() {}
+
+    #if canImport(UIKit)
+    private var uiObservers: [NSObjectProtocol] = []
+    private var fgTimer: Timer?
+    #endif
+
+    private init() {
+        #if canImport(UIKit)
+        uiObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { [weak self] in
+                    await self?._onWillResignActive()
+                }
+            }
+        )
+        uiObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { [weak self] in
+                    await self?._onDidBecomeActive()
+                }
+            }
+        )
+        #endif
+    }
+
+    deinit {
+        #if canImport(UIKit)
+        for obs in uiObservers { NotificationCenter.default.removeObserver(obs) }
+        // Class is @MainActor; deinit runs on the main actor, so invalidate directly.
+        fgTimer?.invalidate()
+        fgTimer = nil
+        #endif
+    }
 
     struct Candidate {
         let id: String
@@ -116,7 +141,55 @@ final class LiveActivityManager {
         let accentHex: String?
     }
 
-    // Primary entrypoint
+    // MARK: Public API (compat shims)
+
+    static func start(for stack: Any, calendar: Calendar) {
+        if let id = extractStackIDString(from: stack) {
+            Task { @MainActor in await LiveActivityManager.shared.sync(stackID: id, reason: "start(for:calendar:)") }
+        } else {
+            MiniDiag.log("[ACT] start WARN could not extract stackID from \(type(of: stack))")
+        }
+    }
+
+    static func start(stackID: String, calendar: Calendar) {
+        Task { @MainActor in await LiveActivityManager.shared.sync(stackID: stackID, reason: "start(stackID:calendar:)") }
+    }
+
+    static func start(_ stackID: String) {
+        Task { @MainActor in await LiveActivityManager.shared.sync(stackID: stackID, reason: "start(_:)") }
+    }
+
+    // MARK: - Visibility/limit retry
+
+    private var retryTasks: [String: Task<Void, Never>] = [:]
+
+    private func cancelRetry(for stackID: String) {
+        retryTasks.removeValue(forKey: stackID)?.cancel()
+    }
+
+    /// Retry until a little after the target (or until success).
+    private func scheduleRetry(for stackID: String, until deadline: Date) {
+        guard retryTasks[stackID] == nil else { return }
+        MiniDiag.log("[ACT] retry.schedule stack=\(stackID) until=\(deadline)")
+        retryTasks[stackID] = Task { [weak self] in
+            var delay = RETRY_INITIAL_DELAY
+            while !Task.isCancelled {
+                if Date() > deadline { break }
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                if Task.isCancelled { break }
+                Task { @MainActor in
+                    await LiveActivityManager.shared.sync(stackID: stackID, reason: "retry.timer")
+                }
+                delay = min(RETRY_MAX_DELAY, delay * 2)
+            }
+            let _: Void = await MainActor.run { [weak self] in
+                self?.retryTasks[stackID] = nil
+            }
+        }
+    }
+
+    // MARK: Primary entrypoint
+
     func sync(stackID: String, reason: String = "sync", excludeID: String? = nil) async {
         let now = Date()
         let existing = Activity<AlarmActivityAttributes>.activities.first { $0.attributes.stackID == stackID }
@@ -127,10 +200,11 @@ final class LiveActivityManager {
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
                 MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-future → end")
             }
+            cancelRetry(for: stackID)
             return
         }
 
-        // Far-future guard
+        // Far-future guard — end or no-op to avoid “in 23h” flashes.
         let lead = chosen.date.timeIntervalSince(now)
         if lead > LA_NEAR_WINDOW {
             if let a = existing {
@@ -140,10 +214,11 @@ final class LiveActivityManager {
             } else {
                 MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
             }
+            cancelRetry(for: stackID)
             return
         }
 
-        let next = AlarmActivityAttributes.ContentState(
+        var next = AlarmActivityAttributes.ContentState(
             stackName: chosen.stackName,
             stepTitle: chosen.stepTitle,
             ends: chosen.date,
@@ -151,6 +226,11 @@ final class LiveActivityManager {
             alarmID: chosen.id,
             firedAt: nil
         )
+
+        // Preserve theme if we already have one.
+        if let theme = existing?.content.state.theme {
+            next.theme = theme
+        }
 
         if let a = existing {
             let st = a.content.state
@@ -164,75 +244,52 @@ final class LiveActivityManager {
             }
             await a.update(ActivityContent(state: next, staleDate: nil))
             MiniDiag.log("[ACT] refresh.update stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
+            cancelRetry(for: stackID)
+            return
+        }
 
-            // If this update happened while we were background/locked, nudge visibility.
-            #if canImport(UIKit)
-            LiveActivityVisibilityRetry.nudgeIfBackground(stackID: stackID)
-            #endif
-        } else {
-            do {
-                _ = try Activity.request(
-                    attributes: AlarmActivityAttributes(stackID: stackID),
-                    content: ActivityContent(state: next, staleDate: nil),
-                    pushType: nil
-                )
-                MiniDiag.log("[ACT] start stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
-            } catch {
-                MiniDiag.log("[ACT] start FAILED stack=\(stackID) error=\(error)")
+        do {
+            _ = try Activity.request(
+                attributes: AlarmActivityAttributes(stackID: stackID),
+                content: ActivityContent(state: next, staleDate: nil),
+                pushType: nil
+            )
+            MiniDiag.log("[ACT] start stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
+            cancelRetry(for: stackID)
+        } catch {
+            let msg = String(describing: error)
+            MiniDiag.log("[ACT] start FAILED stack=\(stackID) error=\(msg)")
+            // If OS thinks there are “too many”, end ours so a later request can succeed.
+            if msg.localizedCaseInsensitiveContains("maximum number of activities") ||
+               msg.localizedCaseInsensitiveContains("targetMaximumExceeded") {
+                await cleanupOverflow(keeping: nil)
+                let stopBy = chosen.date.addingTimeInterval(90)
+                scheduleRetry(for: stackID, until: stopBy)
+                return
+            }
+            // Visibility: we’re likely background/locked. Keep trying a bit past target.
+            if msg.localizedCaseInsensitiveContains("visibility") {
+                let stopBy = chosen.date.addingTimeInterval(90)
+                scheduleRetry(for: stackID, until: stopBy)
             }
         }
     }
 
-    // MARK: - Back-compat shims (start)
-
-    /// New preferred: just a stackID (reason optional)
-    static func start(stackID: String, reason: String = "start") {
-        Task { await LiveActivityManager.shared.sync(stackID: stackID, reason: reason) }
-    }
-
-    /// Old sites that passed a Calendar (ignored now)
-    static func start(stackID: String, calendar: Calendar, reason: String = "start") {
-        start(stackID: stackID, reason: reason)
-    }
-
-    /// Sites that pass the whole `Stack` under `stackID:` (your old pattern)
-    static func start(stackID stack: Any, calendar: Calendar, reason: String = "start") {
-        if let id = extractStackIDString(from: stack) {
-            start(stackID: id, reason: reason)
-        } else {
-            MiniDiag.log("[ACT] start WARN could not extract stackID from \(type(of: stack))")
+    /// If OS complains about "maximum number of activities", end extras so a later request can succeed.
+    private func cleanupOverflow(keeping keep: String?) async {
+        let acts = Activity<AlarmActivityAttributes>.activities
+        if acts.count > 0 {
+            for a in acts {
+                if let keep, a.attributes.stackID == keep { continue }
+                let st = a.content.state
+                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                MiniDiag.log("[ACT] cleanup.overflow ended stack=\(a.attributes.stackID) id=\(a.id)")
+            }
         }
     }
 
-    /// Sites that call `start(stack: ..., calendar: ...)`
-    static func start(stack: Any, calendar: Calendar, reason: String = "start") {
-        if let id = extractStackIDString(from: stack) {
-            start(stackID: id, reason: reason)
-        } else {
-            MiniDiag.log("[ACT] start WARN could not extract stackID from \(type(of: stack))")
-        }
-    }
+    // MARK: - “Ringing” mutation
 
-    /// If someone calls `start(_:)` without labels
-    static func start(_ stackID: String, calendar: Calendar) {
-        start(stackID: stackID)
-    }
-    static func start(_ stackID: String) {
-        start(stackID: stackID)
-    }
-    
-    // Accept the older "for:" label
-    static func start(for stack: Any, calendar: Calendar, reason: String = "start") {
-        start(stack: stack, calendar: calendar, reason: reason)
-    }
-    static func start(for stackID: String, calendar: Calendar, reason: String = "start") {
-        start(stackID: stackID, calendar: calendar, reason: reason)
-    }
-    static func start(for stackID: String) {
-        start(stackID: stackID)
-    }
-
-    // Accept zero-arg markFiredNow() (pick the most relevant active activity)
     static func markFiredNow() {
         let acts = Activity<AlarmActivityAttributes>.activities
         guard let a = acts.min(by: {
@@ -243,7 +300,7 @@ final class LiveActivityManager {
             return
         }
         let st = a.content.state
-        Task {
+        Task { @MainActor in
             await LiveActivityManager.shared._markFiredNow(
                 stackID: a.attributes.stackID,
                 alarmID: st.alarmID,
@@ -254,30 +311,28 @@ final class LiveActivityManager {
         }
     }
 
-    // MARK: - “Ringing” mutation
-
     static func markFiredNow(stackID: String, step: String, firedAt: Date, ends: Date, id: String) {
-        Task { await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: firedAt, ends: ends, stepTitle: step) }
+        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: firedAt, ends: ends, stepTitle: step) }
     }
     static func markFiredNow(stackID: String, stepTitle: String, firedAt: Date, ends: Date, alarmID: String) {
-        Task { await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: stepTitle) }
+        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: stepTitle) }
     }
     static func markFiredNow(stackID: String, alarmID: String, firedAt: Date, ends: Date) {
-        Task { await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: nil) }
+        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: nil) }
     }
     static func markFiredNow(stackID: String, firedAt: Date, ends: Date, id: String? = nil, step: String? = nil) {
-        Task { await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: firedAt, ends: ends, stepTitle: step) }
+        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: firedAt, ends: ends, stepTitle: step) }
     }
-    static func markFiredNow(stackID: String, id: String) {
-        if let stackID = resolveStackIDFromAlarmID(id) {
-            Task { await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: id, firedAt: Date(), ends: Date(), stepTitle: nil) }
+    static func markFiredNow(stackIDFromAlarm id: String) {
+        if let sid = resolveStackIDFromAlarmID(id) {
+            Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: sid, alarmID: id, firedAt: Date(), ends: Date(), stepTitle: nil) }
         } else {
             MiniDiag.log("[ACT] markFiredNow WARN no stackID mapping for alarm \(id)")
         }
     }
     static func markFiredNow(stack: Any, id: String) {
         if let sid = extractStackIDString(from: stack) {
-            Task { await LiveActivityManager.shared._markFiredNow(stackID: sid, alarmID: id, firedAt: Date(), ends: Date(), stepTitle: nil) }
+            Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: sid, alarmID: id, firedAt: Date(), ends: Date(), stepTitle: nil) }
         } else {
             MiniDiag.log("[ACT] markFiredNow WARN could not extract stackID from \(type(of: stack))")
         }
@@ -299,11 +354,6 @@ final class LiveActivityManager {
 
         await a.update(ActivityContent(state: st, staleDate: nil))
         MiniDiag.log("[ACT] markFiredNow stack=\(stackID) step=\(st.stepTitle) firedAt=\(firedAt) ends=\(ends) id=\(st.alarmID)")
-
-        // If we just updated while background/locked (e.g., moving to Step 2), nudge visibility.
-        #if canImport(UIKit)
-        LiveActivityVisibilityRetry.nudgeIfBackground(stackID: stackID)
-        #endif
     }
 
     // MARK: - Candidate selection
@@ -336,20 +386,81 @@ final class LiveActivityManager {
                 return nil
             }()
 
+            // tolerate slight past skew to keep current one alive
             guard let d = date, d >= now.addingTimeInterval(-2) else { continue }
 
             if let b = best {
                 if d < b.date {
-                    best = Candidate(id: uuid.uuidString, date: d, stackName: stringOrDefault(stackName, "Alarm"), stepTitle: stringOrDefault(stepTitle, "Step"), allowSnooze: allow, accentHex: hx)
+                    best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow, accentHex: hx)
                 }
             } else {
-                best = Candidate(id: uuid.uuidString, date: d, stackName: stringOrDefault(stackName, "Alarm"), stepTitle: stringOrDefault(stepTitle, "Step"), allowSnooze: allow, accentHex: hx)
+                best = Candidate(id: uuid.uuidString, date: d, stackName: stackName, stepTitle: stepTitle, allowSnooze: allow, accentHex: hx)
             }
         }
         return best
     }
 
-    private func stringOrDefault(_ s: String, _ def: String) -> String {
-        s.isEmpty ? def : s
+    // MARK: - Discover stacks so we can prewarm while foreground
+
+    func allKnownStackIDs() -> [String] {
+        var out = Set<String>()
+        let keyPrefix = "alarmkit.ids."
+
+        func harvest(_ dict: [String: Any]) {
+            for (k, _) in dict where k.hasPrefix(keyPrefix) {
+                let sid = String(k.dropFirst(keyPrefix.count))
+                out.insert(sid)
+            }
+        }
+
+        harvest(UserDefaults.standard.dictionaryRepresentation())
+        if let grp = UD.group?.dictionaryRepresentation() {
+            harvest(grp)
+        }
+        return Array(out)
+    }
+
+    // MARK: - Foreground cadence and app-life handlers
+
+    private func startForegroundTick() {
+        #if canImport(UIKit)
+        stopForegroundTick()
+        fgTimer = Timer.scheduledTimer(withTimeInterval: FOREGROUND_TICK, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let ids = self.allKnownStackIDs()
+                for sid in ids {
+                    await self.sync(stackID: sid, reason: "fg.tick")
+                }
+            }
+        }
+        RunLoop.main.add(fgTimer!, forMode: .common)
+        #endif
+    }
+
+    private func stopForegroundTick() {
+        #if canImport(UIKit)
+        fgTimer?.invalidate()
+        fgTimer = nil
+        #endif
+    }
+
+    private func _onWillResignActive() async {
+        #if canImport(UIKit)
+        stopForegroundTick()
+        #endif
+        let ids = allKnownStackIDs()
+        for sid in ids {
+            await sync(stackID: sid, reason: "prewarm.willResignActive")
+        }
+    }
+
+    private func _onDidBecomeActive() async {
+        for sid in Array(retryTasks.keys) {
+            await sync(stackID: sid, reason: "retry.didBecomeActive")
+        }
+        #if canImport(UIKit)
+        startForegroundTick()
+        #endif
     }
 }

@@ -6,79 +6,151 @@
 //
 
 import Foundation
-#if canImport(UIKit)
+import ActivityKit
 import UIKit
-#endif
 
-/// If an LA can't show due to a transient visibility condition,
-/// we stash the stackID and retry as the app backgrounds/locks.
-@MainActor
-enum LiveActivityVisibilityRetry {
-    private static var isInstalled = false
-    private static var pending = Set<String>() // stackIDs
-    #if canImport(UIKit)
-    private static var tokens: [NSObjectProtocol] = []
-    #endif
+/// Ensures a Live Activity becomes visible when we detect a "visibility" failure,
+/// and avoids making a request while the app is foreground & near-fire (which often throws).
+/// Intentionally **not** @MainActor so callers anywhere can invoke it; we hop to Main for ActivityKit work.
+final class LiveActivityVisibilityRetry {
 
-    static func registerPending(stackID: String) {
-        pending.insert(stackID)
-        installIfNeeded()
+    static let shared = LiveActivityVisibilityRetry()
+
+    /// Defer if the next fire is within this window **and** the app is active.
+    private let deferThreshold: TimeInterval = 90 // seconds
+
+    private init() {
+        // Install observers on first use.
+        Task { @MainActor in
+            self.installObserversIfNeeded()
+        }
     }
 
-    private static func installIfNeeded() {
-        guard !isInstalled else { return }
-        isInstalled = true
-        #if canImport(UIKit)
+    // MARK: - Public API
+
+    /// Original ordering used at some call sites.
+    func enqueue(reason: String = "visibility", stackID: String) {
+        MiniDiag.log("[ACT] LA request failed (\(reason)); queue→attempt stack=\(stackID)")
+        Task { @MainActor in
+            // If there isn't already a more specific closure queued, fall back to a generic "start or update" attempt.
+            if self.pending[stackID] == nil {
+                self.pending[stackID] = { [weak self] in
+                    guard let _ = self else { return }
+                    await LiveActivityManager.startOrUpdateIfNeeded(forStackID: stackID)
+                }
+            }
+            // We don't run immediately here; we wait for lock/background or a manual kick.
+        }
+    }
+
+    /// Supports calls that pass `stackID` first.
+    func enqueue(stackID: String, reason: String) {
+        enqueue(reason: reason, stackID: stackID)
+    }
+
+    // MARK: - Static conveniences (cover other call-site styles)
+
+    static func enqueue(reason: String = "visibility", stackID: String) {
+        shared.enqueue(reason: reason, stackID: stackID)
+    }
+
+    static func enqueue(stackID: String) {
+        shared.enqueue(reason: "visibility", stackID: stackID)
+    }
+
+    static func enqueue(stackID: String, reason: String) {
+        shared.enqueue(stackID: stackID, reason: reason)
+    }
+
+    // MARK: - New: Foreground deferral helper for brand-new starts
+
+    /// If we’re in the foreground and close to the fire time, **queue** the start until first lock/background.
+    /// Otherwise, execute immediately.
+    @MainActor
+    func maybeDeferOrRun(
+        stackID: String,
+        nextFire: Date,
+        execute: @escaping () async -> Void
+    ) async {
+        let lead = nextFire.timeIntervalSinceNow
+        let state = UIApplication.shared.applicationState
+
+        if state == .active, lead <= deferThreshold {
+            // Coalesce: one runnable per stack.
+            pending[stackID] = execute
+            MiniDiag.log("[ACT] defer.queue stack=\(stackID) lead=\(Int(lead))s state=active")
+        } else {
+            await execute()
+        }
+    }
+
+    /// Manual kick (rarely needed; observers normally kick for us)
+    func kick(_ reason: String = "manual") {
+        Task { @MainActor in
+            await self.drain(reason: reason)
+        }
+    }
+
+    // MARK: - Internals (MainActor)
+
+    @MainActor
+    private var observersInstalled = false
+
+    /// Coalesced pending attempts keyed by stackID.
+    @MainActor
+    private var pending: [String: () async -> Void] = [:]
+
+    @MainActor
+    private var tokens: [NSObjectProtocol] = []
+
+    @MainActor
+    private func installObserversIfNeeded() {
+        guard observersInstalled == false else { return }
+        observersInstalled = true
+
         let nc = NotificationCenter.default
 
-        // Fires when the user hits the lock button (before background).
-        let t1 = nc.addObserver(forName: UIApplication.willResignActiveNotification,
-                                object: nil, queue: .main) { _ in
+        let t1 = nc.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
-                drain(reason: "willResignActive")
+                await self.drain(reason: "willResignActive")
             }
         }
-        tokens.append(t1)
 
-        // Fires after the app actually backgrounds (screen locked).
-        let t2 = nc.addObserver(forName: UIApplication.didEnterBackgroundNotification,
-                                object: nil, queue: .main) { _ in
+        let t2 = nc.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
             Task { @MainActor in
-                // Try shortly after backgrounding, then again a bit later.
-                try? await Task.sleep(nanoseconds: 250_000_000)
-                drain(reason: "didEnterBackground")
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                drain(reason: "didEnterBackground.late")
+                await self.drain(reason: "didEnterBackground")
             }
         }
-        tokens.append(t2)
-        #endif
+
+        tokens.append(contentsOf: [t1, t2])
     }
 
-    static func drain(reason: String) {
-        guard !pending.isEmpty else { return }
-        let ids = pending
+    /// Run and clear all queued attempts.
+    @MainActor
+    private func drain(reason: String) async {
+        guard pending.isEmpty == false else {
+            MiniDiag.log("[ACT] defer.kick \(reason) (empty)")
+            return
+        }
+
+        // Snapshot then clear to avoid re-entrancy issues if execute() re-queues.
+        let runnables = pending
         pending.removeAll()
-        for id in ids {
-            LiveActivityManager.start(stackID: id, reason: "visibilityRetry:\(reason)")
-            // Force a content update even if nothing changed (nudges lock screen).
-            Task { await LiveActivityManager.forceRefreshActiveActivities(forStackID: id) }
+        MiniDiag.log("[ACT] defer.kick \(reason) queued=\(runnables.count)")
+
+        for (stackID, op) in runnables {
+            MiniDiag.log("[ACT] defer.run stack=\(stackID)")
+            await op()
         }
     }
-
-    #if canImport(UIKit)
-    /// If we update while background/locked (e.g., moving to Step 2), nudge visibility.
-    static func nudgeIfBackground(stackID: String) {
-        guard UIApplication.shared.applicationState != .active else { return }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            LiveActivityManager.start(stackID: stackID, reason: "visibilityNudge.quick")
-            await LiveActivityManager.forceRefreshActiveActivities(forStackID: stackID)
-
-            try? await Task.sleep(nanoseconds: 900_000_000)
-            LiveActivityManager.start(stackID: stackID, reason: "visibilityNudge.late")
-            await LiveActivityManager.forceRefreshActiveActivities(forStackID: stackID)
-        }
-    }
-    #endif
 }

@@ -23,12 +23,14 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
             DiagLog.log("UN willPresent id=\(id)")
         }
 
+        // ❗️Alarms are AK-only: never present UN banners/sounds/lists in foreground.
         if notification.request.content.categoryIdentifier == NotificationCategoryID.alarm {
             // markFiredNow() is synchronous — don't await it.
             Task { LiveActivityManager.markFiredNow() }
-            return []
+            return []     // no .banner / .sound / .list
         }
 
+        // Non-alarm categories behave normally.
         return [.banner, .sound, .list]
     }
 
@@ -48,6 +50,7 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         let content = response.notification.request.content
         switch response.actionIdentifier {
         case NotificationActionID.snooze:
+            // UN must never be the source of alarm audio.
             AuxSoundFallback.shared.stop()
             await scheduleSnooze(from: content)
 
@@ -64,26 +67,35 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    /// Schedule a **silent**, **passive** UN snooze so AK remains the only alarm surface.
+    /// This creates no sound and no banner (foreground or background).
     private func scheduleSnooze(from original: UNNotificationContent) async {
         let center = UNUserNotificationCenter.current()
         let snoozeMinutes = (original.userInfo["snoozeMinutes"] as? Int) ?? 9
         guard (original.userInfo["allowSnooze"] as? Bool) ?? true else { return }
 
         let content = UNMutableNotificationContent()
-        content.title = original.title
-        content.subtitle = original.subtitle.isEmpty ? "Snoozed" : "\(original.subtitle) — Snoozed"
-        content.body = original.body
-        content.sound = .default
-        content.interruptionLevel = .timeSensitive
+        // Keep thread & category so our delegate can correlate and suppress foreground presentation.
         content.threadIdentifier = original.threadIdentifier
         content.categoryIdentifier = original.categoryIdentifier
         content.userInfo = original.userInfo
+
+        // 🔇 Absolutely no UN audio.
+        content.sound = nil
+        // 📴 Passive = no banner for background deliveries.
+        content.interruptionLevel = .passive
+        content.relevanceScore = 0
+
+        // Keep text empty to avoid visible chrome; LA / AK will provide the user-facing UI.
+        content.title = ""
+        content.subtitle = ""
+        content.body = ""
 
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: TimeInterval(max(1, snoozeMinutes * 60)),
                                                         repeats: false)
         let id = "snooze-\(UUID().uuidString)"
         let req = UNNotificationRequest(identifier: id, content: content, trigger: trigger)
-        DiagLog.log("UN schedule (snooze) id=\(id) in \(snoozeMinutes)m thread=\(original.threadIdentifier)")
+        DiagLog.log("UN schedule (snooze, silent) id=\(id) in \(snoozeMinutes)m thread=\(original.threadIdentifier)")
         try? await center.add(req)
     }
 }
@@ -99,8 +111,12 @@ struct AlarmStacksApp: App {
         #if DEBUG
         StoreKitLocalTesting.activateIfPossible()
         #endif
+
         NotificationCategories.register()
         UNUserNotificationCenter.current().delegate = notificationDelegate
+
+        // We still request UN authorization for action handling & silent scheduling,
+        // but alarms themselves (sound/visual) come from AK/LA.
         Task { try? await AlarmScheduler.shared.requestAuthorizationIfNeeded() }
 
         // Enable sanitiser immediately (active mode + canceller + launch pass)

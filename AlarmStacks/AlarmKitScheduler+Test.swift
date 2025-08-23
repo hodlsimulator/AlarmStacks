@@ -50,7 +50,7 @@ extension AlarmKitScheduler {
                 secondaryIntent: nil,
                 sound: .default
             )
-
+            
             _ = try await AlarmManager.shared.schedule(id: id, configuration: cfg)
 
             // Simple diag

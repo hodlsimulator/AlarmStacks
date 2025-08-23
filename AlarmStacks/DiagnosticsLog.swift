@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import UserNotifications
+import ActivityKit
 
 // MARK: - App environment snapshot (active/inactive/background + lock state + scene counts)
 
@@ -16,7 +17,6 @@ import UserNotifications
 enum AppEnv {
 
     static func snapshot() -> String {
-        #if canImport(UIKit)
         let app = UIApplication.shared
 
         // Map app state to a readable string
@@ -51,9 +51,6 @@ enum AppEnv {
         }()
 
         return "state=\(stateName) locked=\(locked ? "yes" : "no") scenes{fa=\(fa) fi=\(fi) bg=\(ba) un=\(un)} context=\(context)"
-        #else
-        return "state=unknown (no UIKit)"
-        #endif
     }
 }
 
@@ -97,7 +94,7 @@ enum DiagLog {
         if let g = group {
             var b = g.stringArray(forKey: key) ?? []
             b.append(line)
-            if b.count > maxLines { b.removeFirst(b.count - maxLines) }
+            if b.count > maxLines { b.removeFirst(a.count - maxLines) } // use a.count for sync trimming
             g.set(b, forKey: key)
         }
     }
@@ -138,12 +135,41 @@ enum DiagLog {
     }
 }
 
+// MARK: - Live Activity diagnostics
+
+@MainActor
+enum LADiag {
+
+    /// Logs LA authorization and a compact list of currently active activities for our attributes.
+    /// Call this right after request/update/end, and also on failures, to see if an activity exists.
+    static func logAuthAndActive(from whereFrom: String, stackID: String? = nil, expectingAlarmID: String? = nil) {
+        let info = ActivityAuthorizationInfo()
+        let enabled = info.areActivitiesEnabled
+        let acts = Activity<AlarmActivityAttributes>.activities
+
+        // Summarize as "stackID:alarmID"
+        let summary = acts.map { a in
+            let sid = a.attributes.stackID
+            let aid = a.content.state.alarmID
+            return "\(sid):\(aid)"
+        }.joined(separator: " ")
+
+        let seenExpected: String = {
+            guard let expect = expectingAlarmID, expect.isEmpty == false else { return "-" }
+            return acts.contains(where: { $0.content.state.alarmID == expect }) ? "y" : "n"
+        }()
+
+        DiagLog.log("[ACT] state from=\(whereFrom) stack=\(stackID ?? "-") auth.enabled=\(enabled ? "y" : "n") active.count=\(acts.count) active{\(summary)} expecting=\(expectingAlarmID ?? "-") seen=\(seenExpected)")
+    }
+}
+
 // MARK: - AlarmKit diagnostics record (persist target times + snooze tap tracking)
 
 @MainActor
 enum AKDiag {
     private static func key(_ id: UUID) -> String { "ak.record.\(id.uuidString)" }
     private static func tapKey(_ base: UUID) -> String { "ak.snooze.tap.\(base.uuidString)" }
+    private static func expectedKey(_ id: UUID) -> String { "ak.expected.\(id.uuidString)" }
 
     enum Kind: String, Codable { case step, snooze, test }
 
@@ -230,6 +256,18 @@ enum AKDiag {
     }
 
     static func remove(id: UUID) { UserDefaults.standard.removeObject(forKey: key(id)) }
+
+    // Expected fire time helpers (for simple fallback delta logging)
+    static func markExpected(id: UUID, target: Date) {
+        UserDefaults.standard.set(target.timeIntervalSince1970, forKey: expectedKey(id))
+    }
+    static func loadExpected(id: UUID) -> Date? {
+        let ts = UserDefaults.standard.double(forKey: expectedKey(id))
+        return ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+    }
+    static func clearExpected(id: UUID) {
+        UserDefaults.standard.removeObject(forKey: expectedKey(id))
+    }
 
     // MARK: - Convenience helpers
 

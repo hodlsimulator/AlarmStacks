@@ -55,10 +55,10 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     func firstTargetKey(forStackID id: String) -> String { "ak.firstTarget.\(id)" }
     func kindKey(for id: UUID) -> String { "ak.kind.\(id.uuidString)" }
     func allowSnoozeKey(for id: UUID) -> String { "ak.allowSnooze.\(id.uuidString)" }
-    
+
     // Effective target (timer) key — used for snooze/test timers ONLY
     func effTargetKey(for id: UUID) -> String { "ak.effTarget.\(id.uuidString)" }
-    
+
     // MARK: - Colour helpers
 
     func colorFromHex(_ hex: String) -> SwiftUI.Color {
@@ -151,11 +151,11 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         try await requestAuthorizationIfNeeded()
 
         // If something is about to fire within the protected window, keep current schedules
-        // but make sure the Live Activity shows the *actual* pending target.
+        // but make sure the Live Activity shows the actual pending target.
         if let imminent = nextEnabledStepFireDate(for: stack, calendar: calendar),
            imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
             DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
-            await LiveActivityManager.refreshFromAppGroup()
+            LiveActivityManager.start(stackID: stack.id.uuidString, calendar: calendar)
             return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
@@ -163,10 +163,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             try? await Task.sleep(nanoseconds: Self.postAuthSettleMs * 1_000_000)
         }
 
-        // ✅ Preflight Live Activity so it instantly shows the upcoming step
-        // (prevents a brief flash of an older “tomorrow” state before updates land).
-        await LiveActivityManager.start(for: stack, calendar: calendar)
-
+        // Clear out old schedules before laying down the new plan.
         await cancelAll(for: stack)
 
         var lastFireDate = Date()
@@ -236,6 +233,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             log.info("AK schedule id=\(id.uuidString, privacy: .public) secs=\(seconds, privacy: .public) eff=\(effectiveTarget as NSDate, privacy: .public) nominal=\(nominalFireDate as NSDate, privacy: .public) stack=\(stack.name, privacy: .public) step=\(step.title, privacy: .public)")
             DiagLog.log("AK schedule id=\(id.uuidString) secs=\(seconds)s effTarget=\(DiagLog.f(effectiveTarget)) nominal=\(DiagLog.f(nominalFireDate)); stack=\(stack.name); step=\(step.title)")
 
+            // Persist metadata (LA reads from App Group / defaults)
             defaults.set(effectiveTarget.timeIntervalSince1970, forKey: effTargetKey(for: id))
 
             if let n = step.soundName, !n.isEmpty { defaults.set(n, forKey: soundKey(for: id)) }
@@ -263,6 +261,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
             _ = try await manager.schedule(id: id, configuration: cfg)
 
+            // (Optional diagnostic)
             AKDiag.save(
                 id: id,
                 record: AKDiag.Record(
@@ -294,10 +293,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
 
         // ✅ Confirm/update LA **after** scheduling so it picks up the near-term effective targets.
-        await LiveActivityManager.start(for: stack, calendar: calendar)
-
-        // ✅ Keep the widget/LA theme in sync with the group defaults.
-        await LiveActivityManager.refreshFromAppGroup()
+        LiveActivityManager.start(stackID: stack.id.uuidString, calendar: calendar)
 
         // 🔔 SINGLE place to signal chain change to widget + logs
         ScheduleRevision.bump("chainShift")
@@ -448,6 +444,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     }
 
     private func resolveSound(forStepName name: String?) -> AlertConfiguration.AlertSound {
+        // We only use AK alarms; no UN banners/sounds.
         .default
     }
 
@@ -483,4 +480,3 @@ private func makeAttributes(alert: AlarmPresentation.Alert, tint: SwiftUI.Color)
 }
 
 #endif
-    

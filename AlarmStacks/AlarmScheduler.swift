@@ -120,7 +120,7 @@ final class UserNotificationScheduler: AlarmScheduling {
         }
 
         // ✅ Start/update the Live Activity only after notifications are scheduled.
-        LiveActivityManager.start(stack: stack, calendar: calendar)
+        LiveActivityManager.start(for: stack, calendar: calendar)
 
         return identifiers
     }
