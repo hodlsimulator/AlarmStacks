@@ -14,6 +14,10 @@ import ActivityKit
 import UIKit
 #endif
 
+// Shared tolerance to avoid flapping exactly at the boundary.
+// Timer only when target is in the future by more than this epsilon.
+private let TIMER_EPSILON: TimeInterval = 0.4
+
 // MARK: - Static widget
 struct NextAlarmEntry: TimelineEntry { let date: Date; let info: NextAlarmInfo? }
 
@@ -28,6 +32,7 @@ struct NextAlarmProvider: TimelineProvider {
         let info = NextAlarmBridge.read()
         var entries = [NextAlarmEntry(date: .now, info: info)]
         if let fire = info?.fireDate {
+            // Add a post-fire tick so we flip to absolute time and never count up.
             entries.append(.init(date: fire.addingTimeInterval(0.5), info: info))
             completion(.init(entries: entries, policy: .after(fire.addingTimeInterval(60))))
         } else {
@@ -85,7 +90,9 @@ struct NextAlarmWidgetView: View {
             if let info = entry.info {
                 Text(info.stackName).font(.headline.weight(.semibold)).fontDesign(.rounded).singleLineTightTail()
                 Text(info.stepTitle).font(.subheadline).fontDesign(.rounded).foregroundStyle(.secondary).singleLineTightTail()
-                if entry.date < info.fireDate {
+
+                // Static widget: never let the timer count up — use epsilon.
+                if info.fireDate.timeIntervalSince(entry.date) > TIMER_EPSILON {
                     Text(info.fireDate, style: .timer).monospacedDigit().font(timerFont).singleLineTightTail(minScale: 0.7)
                 } else {
                     Text(info.fireDate, style: .time).monospacedDigit().font(timerFont.weight(.bold)).singleLineTightTail(minScale: 0.7)
@@ -113,16 +120,60 @@ struct NextAlarmWidget: Widget {
 }
 
 #if canImport(ActivityKit)
-// MARK: - LA view logger (extension-only)
+// MARK: - LA time/status helpers (single source of truth)
+
+fileprivate struct LATimeDecider {
+    static func isPreFire(_ ends: Date, now: Date = .init()) -> Bool {
+        return ends.timeIntervalSince(now) > TIMER_EPSILON
+    }
+
+    /// Returns the chip text and which time to display.
+    /// - useTimer: show a decreasing timer to `ends`
+    /// - clockDate: absolute time to show when not using a timer
+    static func mode(for state: AlarmActivityAttributes.ContentState, now: Date = .init())
+      -> (chip: String, useTimer: Bool, clockDate: Date, timerTo: Date)
+    {
+        let pre = isPreFire(state.ends, now: now)
+        if pre {
+            // Future → countdown + "Next step"
+            return ("NEXT STEP", true, state.ends, state.ends)
+        } else {
+            // At/after boundary → never show timer
+            if let fired = state.firedAt {
+                // Prefer the actual fired moment when ringing
+                return ("RINGING", false, fired, state.ends)
+            } else {
+                // Edge/race: not flagged as ringing; fall back to the scheduled time
+                return ("NEXT STEP", false, state.ends, state.ends)
+            }
+        }
+    }
+}
+
+// MARK: - LA view logger (extension-only, throttled)
 private enum LAViewLogger {
     private static let logKey = "diag.log.lines"
-    private static let fmt: DateFormatter = { let f = DateFormatter()
+
+    // ISO-ish local timestamp (matches DiagnosticsLog.swift style)
+    private static let fmt: DateFormatter = {
+        let f = DateFormatter()
         f.calendar = .init(identifier: .iso8601)
         f.locale   = .init(identifier: "en_US_POSIX")
         f.timeZone = .current
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"
         return f
     }()
+
+    // 🚦 Throttle: at most one line per surface every ~1.25s
+    private static let throttleS: TimeInterval = 1.25
+    private static var lastLogAt: [String: Date] = [:]
+
+    private static func shouldLog(surface: String, now: Date = .init()) -> Bool {
+        if let prev = lastLogAt[surface], now.timeIntervalSince(prev) < throttleS { return false }
+        lastLogAt[surface] = now
+        return true
+    }
+
     private static func append(_ line: String) {
         let stamp = "[\(fmt.string(from: .init())) | up:\(String(format:"%.3f", ProcessInfo.processInfo.systemUptime))s]"
         let full  = "\(stamp) \(line)"
@@ -132,8 +183,11 @@ private enum LAViewLogger {
         if lines.count > 2000 { lines.removeFirst(lines.count - 2000) }
         ud?.set(lines, forKey: logKey)
     }
+
     static func logRender(surface: String, state: AlarmActivityAttributes.ContentState) {
-        append("[LA] render surface=\(surface) stack=\(state.stackName) step=\(state.stepTitle) ends=\(fmt.string(from: state.ends)) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
+        guard shouldLog(surface: surface) else { return }
+        let m = LATimeDecider.mode(for: state)
+        append("[LA] render surface=\(surface) chip=\(m.chip) useTimer=\(m.useTimer ? "y" : "n") ends=\(fmt.string(from: state.ends)) firedAt=\(state.firedAt.map(fmt.string(from:)) ?? "-") stack=\(state.stackName) step=\(state.stepTitle) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
     }
 }
 
@@ -143,6 +197,7 @@ private struct AlarmActivityLockRoot: View {
 
     var body: some View {
         let accent = context.state.theme.accent.color
+        let m = LATimeDecider.mode(for: context.state)
 
         VStack(spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -159,7 +214,7 @@ private struct AlarmActivityLockRoot: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("NEXT STEP")
+                    Text(m.chip)
                         .font(.caption2.weight(.semibold))
                         .tracking(0.8)
                         .padding(.horizontal, 8)
@@ -185,10 +240,10 @@ private struct AlarmActivityLockRoot: View {
                 Spacer(minLength: 8)
 
                 Group {
-                    if context.state.ends > Date() {
-                        Text(context.state.ends, style: .timer).monospacedDigit()
+                    if m.useTimer {
+                        Text(m.timerTo, style: .timer).monospacedDigit()
                     } else {
-                        Text(context.state.ends, style: .time).monospacedDigit()
+                        Text(m.clockDate, style: .time).monospacedDigit()
                     }
                 }
                 .font(.title.weight(.bold))
@@ -215,15 +270,16 @@ struct AlarmActivityWidget: Widget {
             AlarmActivityLockRoot(context: context)
         } dynamicIsland: { context in
             let accent = context.state.theme.accent.color
+            let m = LATimeDecider.mode(for: context.state)
 
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: "alarm.fill").foregroundStyle(accent)
-                        .onAppear { LAViewLogger.logRender(surface: "island.expanded", state: context.state) }
+                        .onAppear { LAViewLogger.logRender(surface: "island.expanded.leading", state: context.state) }
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("NEXT STEP")
+                        Text(m.chip)
                             .font(.caption2.weight(.semibold))
                             .tracking(0.8)
                             .singleLineTightTail()
@@ -237,20 +293,20 @@ struct AlarmActivityWidget: Widget {
                             .foregroundStyle(.secondary)
                             .singleLineTightTail()
                     }
-                    .onAppear { LAViewLogger.logRender(surface: "island.expanded", state: context.state) }
-                    .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.expanded", state: s) }
+                    .onAppear { LAViewLogger.logRender(surface: "island.expanded.center", state: context.state) }
+                    .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.expanded.center", state: s) }
                 }
                 DynamicIslandExpandedRegion(.trailing) { EmptyView() }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
                         Group {
-                            if context.state.ends > Date() {
-                                Text(context.state.ends, style: .timer)
+                            if m.useTimer {
+                                Text(m.timerTo, style: .timer)
                                     .monospacedDigit()
                                     .minimumScaleFactor(0.7)
                                     .lineLimit(1)
                             } else {
-                                Text(context.state.ends, style: .time).monospacedDigit()
+                                Text(m.clockDate, style: .time).monospacedDigit()
                             }
                         }
                         .font(.title3.weight(.semibold))
@@ -259,21 +315,23 @@ struct AlarmActivityWidget: Widget {
                 }
             } compactLeading: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
-                    .onAppear { LAViewLogger.logRender(surface: "island.compactLeading", state: context.state) }
+                    .onAppear { LAViewLogger.logRender(surface: "island.compact.leading", state: context.state) }
             } compactTrailing: {
+                // Compact trailing MUST never count up; keep monospaced & single line.
                 Group {
-                    if context.state.ends > Date() {
-                        Text(context.state.ends, style: .timer).monospacedDigit()
+                    if m.useTimer {
+                        Text(m.timerTo, style: .timer).monospacedDigit()
                     } else {
-                        Text(context.state.ends, style: .time).monospacedDigit()
+                        Text(m.clockDate, style: .time).monospacedDigit()
                     }
                 }
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
                 .multilineTextAlignment(.trailing)
-                .onAppear { LAViewLogger.logRender(surface: "island.compactTrailing", state: context.state) }
-                .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.compactTrailing", state: s) }
+                .onAppear { LAViewLogger.logRender(surface: "island.compact.trailing", state: context.state) }
+                .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.compact.trailing", state: s) }
             } minimal: {
+                // Minimal is glyph-only by design.
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
                     .onAppear { LAViewLogger.logRender(surface: "island.minimal", state: context.state) }
             }

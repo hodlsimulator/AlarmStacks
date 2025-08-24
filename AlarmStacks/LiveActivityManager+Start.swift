@@ -15,25 +15,17 @@ extension LiveActivityManager {
 
     // MARK: Public entry points
 
-    /// Call this from the scheduler *while the app is foreground* (right after you persist App Group keys).
+    /// Call this after you persist App Group keys (don’t gate on visibility).
     @MainActor
     static func ensureFromAppGroup(stackID: String) async {
-        guard isActive else {
-            DiagLog.log("[ACT] ensure.skip (not active) stack=\(stackID)")
-            return
-        }
         await refreshFromGroup(stackID: stackID, excludeID: nil)
     }
 
     /// Convenience: use if your call sites pass a `Stack` (or anything) instead of a String.
     @MainActor
     static func ensureFromStack(_ maybeStack: Any?) async {
-        guard isActive else {
-            DiagLog.log("[ACT] start.skip (not active)")
-            return
-        }
         guard let sid = extractStackID(maybeStack) else {
-            DiagLog.log("[ACT] start WARN could not extract stackID from Stack")
+            DiagLog.log("[ACT] ensure WARN could not extract stackID from Stack")
             return
         }
         await refreshFromGroup(stackID: sid, excludeID: nil)
@@ -42,21 +34,16 @@ extension LiveActivityManager {
     /// Keep this for callers that already have the ID and just want a minimal ensure.
     @MainActor
     static func startOrUpdateIfNeeded(forStackID stackID: String) async {
-        guard isActive else {
-            DiagLog.log("[ACT] ensure.skip (not active) stack=\(stackID)")
-            return
-        }
         await refreshFromGroup(stackID: stackID, excludeID: nil)
     }
 
-    /// ⬅️ Renamed to avoid colliding with the shim in LiveActivityManager.swift
-    /// Called by the pre-arm gate.
+    /// Called by pre-arm planning or opportunistically; not gated.
     @MainActor
     static func attemptStartNow(stackID: String, calendar: Calendar = .current) async {
         await refreshFromGroup(stackID: stackID, excludeID: nil)
     }
 
-    // MARK: Core refresh (reads App Group → creates/updates/ends LA)
+    // MARK: Core refresh (reads App Group → creates/updates LA)
 
     @MainActor
     private static func refreshFromGroup(stackID: String, excludeID: String?) async {
@@ -73,16 +60,18 @@ extension LiveActivityManager {
         let ids = LAUD.rStringArray(LA.storageKey(forStackID: stackID))
         let now = Date()
 
-        // Existing activity for this stack (if any)
-        let existing = Activity<AlarmActivityAttributes>.activities
+        // Existing activity for this stack (if any), else fall back to a bridge.
+        let existingExact = Activity<AlarmActivityAttributes>.activities
             .first(where: { $0.attributes.stackID == stackID })
+        let existing = existingExact ?? LAEnsure.findExisting(stackID: nil)
 
-        guard ids.isEmpty == false else {
+        // If nothing tracked at the moment, keep any existing LA rather than ending.
+        if ids.isEmpty {
             if let a = existing {
-                let st = a.content.state
-                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                DiagLog.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
-                LADiag.logAuthAndActive(from: "end.noTracked", stackID: stackID, expectingAlarmID: nil)
+                let lead = a.content.state.ends.timeIntervalSince(now)
+                DiagLog.log(String(format: "[ACT] refresh.noTracked.keep stack=%@ lead=%.0fs", stackID, lead))
+            } else {
+                DiagLog.log("[ACT] refresh.noTracked stack=\(stackID) (no existing) → no-op")
             }
             return
         }
@@ -130,79 +119,41 @@ extension LiveActivityManager {
             }
         }
 
-        // Nothing future → end if present
+        // If we couldn't compute a future candidate, keep the current LA instead of ending it.
         guard let chosen = best else {
             if let a = existing {
-                let st = a.content.state
-                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                DiagLog.log("[ACT] refresh.end stack=\(stackID) no-future → end")
-                LADiag.logAuthAndActive(from: "end.noFuture", stackID: stackID, expectingAlarmID: nil)
+                let lead = a.content.state.ends.timeIntervalSince(now)
+                DiagLog.log(String(format: "[ACT] refresh.noFuture.keep stack=%@ lead=%.0fs", stackID, lead))
+            } else {
+                DiagLog.log("[ACT] refresh.noFuture stack=\(stackID) (no existing) → no-op")
             }
             return
         }
 
-        // Far-future (avoid showing “in 23h” on first lock)
+        // Optional: if it's very far out, end only if the existing LA belongs to THIS stack.
         let lead = chosen.date.timeIntervalSince(now)
         if lead > LA.nearWindow {
-            if let a = existing {
+            if let a = existingExact {
                 let st = a.content.state
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
                 DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
             } else {
-                DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
+                DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → keep bridge/none")
             }
             return
         }
 
-        // Build state (preserve current theme if we have one)
-        let currentTheme = existing?.content.state.theme
-        var newState = AlarmActivityAttributes.ContentState(
+        // ✅ Create early or update the single reusable activity.
+        await LAEnsure.ensure(
+            stackID: stackID,
             stackName: chosen.stackName,
-            stepTitle: chosen.stepTitle,        // UI copy for LA is handled in the widget; here we pass the raw step name.
+            stepTitle: chosen.stepTitle,     // UI copy handled in the widget; pass raw step name here.
             ends: chosen.date,
             allowSnooze: chosen.allowSnooze,
             alarmID: chosen.id,
+            theme: existing?.content.state.theme ?? ThemeMap.payload(for: "Default"),
             firedAt: nil
         )
-        if let theme = currentTheme { newState.theme = theme }
-
-        if let a = existing {
-            // Skip churn if identical
-            let st = a.content.state
-            if st.stackName == newState.stackName &&
-               st.stepTitle == newState.stepTitle &&
-               st.ends == newState.ends &&
-               st.allowSnooze == newState.allowSnooze &&
-               st.firedAt == nil &&
-               st.alarmID == newState.alarmID {
-                return
-            }
-            await a.update(ActivityContent(state: newState, staleDate: nil))
-            DiagLog.log("[ACT] refresh.update stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
-            LADiag.logAuthAndActive(from: "update.ok", stackID: stackID, expectingAlarmID: newState.alarmID)
-        } else {
-            do {
-                _ = try Activity.request(
-                    attributes: AlarmActivityAttributes(stackID: stackID),
-                    content: ActivityContent(state: newState, staleDate: nil),
-                    pushType: nil
-                )
-                DiagLog.log("[ACT] refresh.start stack=\(stackID) step=\(newState.stepTitle) ends=\(newState.ends) id=\(newState.alarmID)")
-                LADiag.logAuthAndActive(from: "start.ok", stackID: stackID, expectingAlarmID: newState.alarmID)
-            } catch {
-                let es = String(describing: error)
-                DiagLog.log("[ACT] refresh request failed stack=\(stackID) error=\(es)")
-                LADiag.logAuthAndActive(from: "start.failed", stackID: stackID, expectingAlarmID: newState.alarmID)
-
-                // Typical transient errors we should back off from.
-                if es.contains("targetMaximumExceeded") {
-                    beginCooldown(seconds: 10 * 60, reason: "targetMaximumExceeded")
-                } else if es.contains("visibility") {
-                    // Schedule a first-lock/background retry (installed by LiveActivityVisibilityRetry).
-                    LiveActivityVisibilityRetry.enqueue(stackID: stackID, reason: "visibility")
-                }
-            }
-        }
     }
 
     // MARK: Helpers

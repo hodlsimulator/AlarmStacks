@@ -9,15 +9,15 @@ import Foundation
 import ActivityKit
 import os
 
-/// iOS 16.2+
-/// Coalesced, throttled pre-arm for Live Activities so we don't hit ActivityKit rate limits.
+/// iOS 16.2+ (project targets iOS 26)
+/// Coalesced, throttled pre-arm for Live Activities.
+/// Modified to: no visibility gate, no “too close” hard floor.
 extension LiveActivityManager {
 
     private static let _log = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "LA.Prearm")
 
     // One plan (Task) per stackID, so reschedules replace older plans.
     private static var _plans = [String: Task<Void, Never>]()
-    private static let _gate = LAStartGate()
 
     public struct LAStartPayload: Sendable {
         public let stackID: String
@@ -76,14 +76,14 @@ extension LiveActivityManager {
         let planTimes = LiveActivityPlanner.plannedAttempts(for: effTarget, now: now)
 
         if planTimes.isEmpty {
-            // Missed windows — a single opportunistic attempt (will self-guard).
+            // Missed windows — a single opportunistic attempt (no gate).
             await attemptStartNow(stackID: stackID, effTarget: effTarget)
             return
         }
 
         DiagLog.log("[LA] prearm plan stack=\(stackID) effTarget=\(DiagLog.f(effTarget)) attempts=\(planTimes.map { Int($0.timeIntervalSinceNow) })s")
 
-        // Background runner: sleep until each slot then do a gated start attempt.
+        // Background runner: sleep until each slot then do an ungated start attempt.
         let task = Task.detached(priority: .background) {
             for t in planTimes {
                 if Task.isCancelled { break }
@@ -98,35 +98,14 @@ extension LiveActivityManager {
         _plans[stackID] = task
     }
 
-    /// Single, gated `start` attempt; does nothing if throttled/disabled/too late.
+    /// Single, ungated `start` attempt (no visibility/“too close” guards).
     @MainActor
     private static func attemptStartNow(stackID: String, effTarget: Date) async {
-        if LAFlags.deviceDisabled {
-            DiagLog.log("[LA] prearm.attempt.skip (device disabled) stack=\(stackID)")
-            return
-        }
-
-        let remain = effTarget.timeIntervalSinceNow
-        // Respect the planner’s hard floor (OS late-start guardrails)
-        if remain < LiveActivityPlanner.hardMinimumLeadSeconds {
-            DiagLog.log(String(format: "[LA] prearm.create.skip (too close; remain=%.0fs) stack=%@", remain, stackID))
-            return
-        }
-
-        let ok = await _gate.shouldAttempt(now: Date())
-        if ok == false {
-            DiagLog.log("[LA] prearm (throttled) stack=\(stackID)")
-            return
-        }
-
-        DiagLog.log(String(format: "[LA] prearm attempt stack=%@ remain=%.0fs", stackID, remain))
-
         guard let p = _latestPayload[stackID] else {
             DiagLog.log("[LA] prearm.attempt.skip (no payload) stack=\(stackID)")
             return
         }
 
-        // Ask the controller to prearm/update. It knows how to classify errors.
         await LiveActivityController.shared.prearmOrUpdate(
             stackID: p.stackID,
             stackName: p.stackName,
@@ -136,32 +115,5 @@ extension LiveActivityManager {
             alarmID: p.alarmID,
             theme: p.theme
         )
-    }
-}
-
-/// Global gate so we never spam ActivityKit.
-private actor LAStartGate {
-    // No more than `maxAttempts` within `windowLength`.
-    private let windowLength: TimeInterval = 120   // 2 minutes
-    private let maxAttempts: Int = 3               // across all stacks
-    private var windowStart: Date = .distantPast
-    private var attemptsInWindow: Int = 0
-    private var lastAttemptAt: Date = .distantPast
-
-    // Also add a tiny per-attempt cooldown so we never call twice within a few seconds.
-    private let minSpacing: TimeInterval = 5
-
-    func shouldAttempt(now: Date) -> Bool {
-        if now.timeIntervalSince(lastAttemptAt) < minSpacing { return false }
-
-        if now.timeIntervalSince(windowStart) > windowLength {
-            windowStart = now
-            attemptsInWindow = 0
-        }
-        if attemptsInWindow >= maxAttempts { return false }
-
-        attemptsInWindow += 1
-        lastAttemptAt = now
-        return true
     }
 }

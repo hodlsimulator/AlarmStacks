@@ -17,14 +17,14 @@ public struct LiveActivityPlanner {
     /// Any attempt scheduled with less lead than this will be dropped proactively.
     ///
     /// Rationale:
-    /// Logs showed repeated `[ACT] start FAILED ... error=targetMaximumExceeded` when attempting at ~29s.
+    /// Prior logs showed repeated target-cap errors when attempting too close to T-0 (≈30s lead).
     /// We enforce a ≥ 48s floor to stay clear of the OS's late-start guardrails.
     public static let hardMinimumLeadSeconds: TimeInterval = 48
 
     /// Offsets (in seconds) *before* the effective target at which we plan to prearm the Live Activity.
     /// Order matters: earlier attempts come first. Do not include values below `hardMinimumLeadSeconds`.
     ///
-    /// Previous plan `[28, 48]` routinely hit `targetMaximumExceeded`. This shifts earlier and adds redundancy.
+    /// Previous plan `[28, 48]` routinely hit cap errors. This shifts earlier and adds redundancy.
     public static let attemptOffsetsSeconds: [TimeInterval] = [120, 90, 60, 48]
 
     /// If an attempt would fall into the last `protectedWindowBeforeTargetSeconds` before target,

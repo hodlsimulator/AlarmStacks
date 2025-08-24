@@ -18,28 +18,11 @@ public protocol LiveActivityStarter {
     func startLiveActivity(effTarget: Date) async throws -> Bool
 }
 
-/// Lightweight rate limiter to avoid spamming start attempts when we're already too late.
-public final class AttemptGate {
-    private var attempts: [String: Int] = [:]
-    private let maxAttemptsPerTarget: Int
-
-    public init(maxAttemptsPerTarget: Int = 3) {
-        self.maxAttemptsPerTarget = maxAttemptsPerTarget
-    }
-
-    public func shouldAttempt(key: String) -> Bool {
-        let count = attempts[key, default: 0]
-        if count >= maxAttemptsPerTarget { return false }
-        attempts[key] = count + 1
-        return true
-    }
-}
-
 /// Coordinates planning and execution of Live Activity prearm attempts.
+/// This version does **not** self-gate on “late windows” or attempt exhaustion.
 public final class LiveActivityDriver {
 
     private let starter: LiveActivityStarter
-    private let gate = AttemptGate(maxAttemptsPerTarget: 3)
     private let queue = DispatchQueue(label: "live-activity-driver")
 
     public init(starter: LiveActivityStarter) {
@@ -77,55 +60,24 @@ public final class LiveActivityDriver {
         }
     }
 
-    /// Performs a guarded start attempt. If we're inside the late-start window, we skip instead of
-    /// hammering ActivityKit (which previously yielded `targetMaximumExceeded` repeatedly).
+    /// Performs an attempt — no driver-level skip logic; let the app-layer decide.
     private func performAttempt(effTarget: Date) async {
         let now = Date()
-        let lead = effTarget.timeIntervalSince(now)
-
-        // Late-start guard.
-        if lead < LiveActivityPlanner.hardMinimumLeadSeconds {
-            log("[ACT] start SKIP reason=late-window lead=\(Int(lead))s effTarget=\(fmt(effTarget))")
-            return
-        }
-
-        // Backoff/limit repeat attempts per target.
-        let key = Self.key(for: effTarget)
-        guard gate.shouldAttempt(key: key) else {
-            log("[ACT] start SKIP reason=attempts-exhausted effTarget=\(fmt(effTarget))")
-            return
-        }
+        let lead = Int(effTarget.timeIntervalSince(now))
 
         do {
             let accepted = try await starter.startLiveActivity(effTarget: effTarget)
             if accepted {
-                log("[ACT] start OK lead=\(Int(lead))s effTarget=\(fmt(effTarget))")
+                log("[LA] attempt OK lead=\(lead)s effTarget=\(fmt(effTarget))")
             } else {
-                // Starter declined (e.g., visibility conditions). We do not reschedule here;
-                // any additional planned attempts will still run if they were pre-enqueued.
-                log("[ACT] start DECLINED lead=\(Int(lead))s effTarget=\(fmt(effTarget))")
+                log("[LA] attempt DECLINED lead=\(lead)s effTarget=\(fmt(effTarget))")
             }
         } catch {
-            // Classify common "too late" errors so we don't thrash.
-            if Self.isTargetMaximumExceeded(error) {
-                log("[ACT] start FAILED error=targetMaximumExceeded lead=\(Int(lead))s effTarget=\(fmt(effTarget)) (will not retry immediately)")
-            } else {
-                log("[ACT] start FAILED error=\(error) lead=\(Int(lead))s effTarget=\(fmt(effTarget))")
-            }
+            log("[LA] attempt FAILED lead=\(lead)s effTarget=\(fmt(effTarget)) error=\(error)")
         }
     }
 
     // MARK: - Helpers
-
-    private static func key(for effTarget: Date) -> String {
-        String(Int(effTarget.timeIntervalSince1970))
-    }
-
-    /// Best-effort classification without leaking ActivityKit types out of the starter.
-    private static func isTargetMaximumExceeded(_ error: Error) -> Bool {
-        let s = String(describing: error).lowercased()
-        return s.contains("targetmaximumexceeded") || s.contains("target maximum exceeded") || s.contains("too late")
-    }
 
     private func leadString(_ target: Date, _ when: Date) -> String {
         let lead = Int(target.timeIntervalSince(when))

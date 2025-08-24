@@ -11,6 +11,12 @@ import UIKit
 import UserNotifications
 import ActivityKit
 
+// Put tunables in a non-isolated container so they are safe to read anywhere.
+public enum LATuning {
+    /// Timer only when target is in the future by more than this epsilon.
+    public static let timerEpsilon: TimeInterval = 0.4
+}
+
 // MARK: - App environment snapshot (active/inactive/background + lock state + scene counts)
 
 @MainActor
@@ -70,10 +76,24 @@ enum DiagLog {
         return f
     }()
 
+    // Lightweight clock-only (localised short time)
+    private static let clockOnly: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .iso8601)
+        f.locale = Locale.autoupdatingCurrent
+        f.timeZone = .current
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
     private static var group: UserDefaults? { UserDefaults(suiteName: AppGroups.main) }
 
     /// Format a date in local time with offset.
     static func f(_ date: Date) -> String { local.string(from: date) }
+
+    /// Format a date as a user-facing clock time (e.g. “04:39”)
+    static func clock(_ date: Date) -> String { clockOnly.string(from: date) }
 
     /// Append a line with a stable prelude: local timestamp + monotonic uptime.
     /// Writes to BOTH the app container and the App Group so the widget/extension can read it too.
@@ -93,7 +113,7 @@ enum DiagLog {
         if let g = group {
             var b = g.stringArray(forKey: key) ?? []
             b.append(line)
-            if b.count > maxLines { b.removeFirst(a.count - maxLines) } // use a.count for sync trimming
+            if b.count > maxLines { b.removeFirst(b.count - maxLines) }
             g.set(b, forKey: key)
         }
     }
@@ -139,6 +159,8 @@ enum DiagLog {
 @MainActor
 enum LADiag {
 
+    // MARK: Auth + active list
+
     /// Logs LA authorization and a compact list of currently active activities for our attributes.
     /// Call this right after request/update/end, and also on failures, to see if an activity exists.
     static func logAuthAndActive(from whereFrom: String, stackID: String? = nil, expectingAlarmID: String? = nil) {
@@ -161,8 +183,17 @@ enum LADiag {
         DiagLog.log("[ACT] state from=\(whereFrom) stack=\(stackID ?? "-") auth.enabled=\(enabled ? "y" : "n") active.count=\(acts.count) active{\(summary)} expecting=\(expectingAlarmID ?? "-") seen=\(seenExpected)")
     }
 
-    /// Timer direction diagnostic.
+    // MARK: Timer direction + boundary
+
+    // Wrapper with default epsilon (avoids default-arg evaluation issues in Swift 6).
     static func logTimer(whereFrom: String, start: Date?, end: Date, now: Date = Date()) {
+        logTimer(whereFrom: whereFrom, start: start, end: end, now: now, epsilon: LATuning.timerEpsilon)
+    }
+
+    /// Core: explicit epsilon (callers may pass a custom tolerance).
+    static func logTimer(whereFrom: String, start: Date?, end: Date, now: Date, epsilon: TimeInterval) {
+        let rawRemain = end.timeIntervalSince(now)
+
         if let start {
             let elapsed = max(0, now.timeIntervalSince(start))
             DiagLog.log(String(
@@ -170,12 +201,92 @@ enum LADiag {
                 whereFrom, DiagLog.f(start), DiagLog.f(end), DiagLog.f(now), elapsed
             ))
         } else {
-            let remain = max(0, end.timeIntervalSince(now))
+            let remain = max(0, rawRemain)
             DiagLog.log(String(
                 format: "[ACT] timer where=%@ dir=down start=- end=%@ now=%@ remain=%.3fs elapsed=-s",
                 whereFrom, DiagLog.f(end), DiagLog.f(now), remain
             ))
         }
+
+        // Extra analysis line (does not replace the original one)
+        let boundary = boundaryBucket(rawRemain: rawRemain, epsilon: epsilon)
+        let willUseTimer = rawRemain > epsilon ? "y" : "n"
+        DiagLog.log(String(
+            format: "[ACT] timer.eval where=%@ eps=%.3fs rawRemain=%.3fs boundary=%@ willUseTimer=%@",
+            whereFrom, epsilon, rawRemain, boundary, willUseTimer
+        ))
+    }
+
+    /// Classify how close we are to the boundary (purely for diagnostics).
+    private static func boundaryBucket(rawRemain: TimeInterval, epsilon: TimeInterval) -> String {
+        if rawRemain > epsilon { return "PRE" }           // clearly before
+        if rawRemain < -epsilon { return "POST" }         // clearly after
+        return "BOUNDARY"                                 // within ±epsilon of target
+    }
+
+    // MARK: Render decision logging (what the UI will *actually* show)
+
+    // Wrapper with default epsilon.
+    static func logRenderDecision(
+        surface: String,
+        state st: AlarmActivityAttributes.ContentState,
+        now: Date = Date()
+    ) {
+        logRenderDecision(surface: surface, state: st, epsilon: LATuning.timerEpsilon, now: now)
+    }
+
+    /// Core: explicit epsilon (callers may pass a custom tolerance).
+    static func logRenderDecision(
+        surface: String,
+        state st: AlarmActivityAttributes.ContentState,
+        epsilon: TimeInterval,
+        now: Date
+    ) {
+        let rawRemain = st.ends.timeIntervalSince(now)
+        let preFire   = rawRemain > epsilon
+        let ringing   = (st.firedAt != nil)
+
+        let chip = preFire ? "NEXT STEP" : (ringing ? "RINGING" : "NEXT STEP")
+        let useTimer = preFire
+        let clockDate = ringing ? (st.firedAt ?? st.ends) : st.ends
+        let boundary  = boundaryBucket(rawRemain: rawRemain, epsilon: epsilon)
+        let sinceFired = ringing ? now.timeIntervalSince(st.firedAt ?? now) : nil
+
+        // Note: when useTimer==true we *count down* to st.ends; otherwise we show an absolute clock time.
+        DiagLog.log(String(
+            format: "[LA MODE] surface=%@ chip=%@ display=%@ eps=%.3fs boundary=%@ rawRemain=%.3fs preFire=%@ ringing=%@ " +
+                    "ends.clock=%@ firedAt.clock=%@ chosen.clock=%@ timer.to=%@ " +
+                    "stack=%@ step=%@ id=%@",
+            surface,
+            chip,
+            useTimer ? "timer" : "clock",
+            epsilon,
+            boundary,
+            rawRemain,
+            preFire ? "y" : "n",
+            ringing ? "y" : "n",
+            DiagLog.clock(st.ends),
+            st.firedAt.map(DiagLog.clock) ?? "-",
+            DiagLog.clock(clockDate),
+            useTimer ? DiagLog.clock(st.ends) : "-",
+            st.stackName,
+            st.stepTitle,
+            st.alarmID.isEmpty ? "-" : st.alarmID
+        ))
+
+        if let sinceFired {
+            DiagLog.log(String(
+                format: "[LA MODE+] surface=%@ sinceFired=%.3fs firedAt=%@",
+                surface, sinceFired, DiagLog.f(st.firedAt!)
+            ))
+        }
+    }
+
+    /// Optional: Log a compact-trailing sample of what’s being drawn (helps catch wrapping/width growth).
+    static func logCompactTrailingSample(surface: String, drawnText: String) {
+        let count = drawnText.count
+        let hasColon = drawnText.contains(":") ? "y" : "n"
+        DiagLog.log("[LA CT] surface=\(surface) sample=\"\(drawnText)\" chars=\(count) colon=\(hasColon)")
     }
 }
 

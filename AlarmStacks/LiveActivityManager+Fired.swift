@@ -21,4 +21,31 @@ extension LiveActivityManager {
             await activity.update(content)
         }
     }
+
+    /// T-0 last resort: if no activity exists at fire time, create one immediately.
+    /// Call this from your fire path when you have the full context handy.
+    @MainActor
+    static func ensureAtFireTimeIfMissing(
+        stackID: String,
+        stackName: String,
+        stepTitle: String,
+        scheduledEnds: Date,
+        alarmID: String,
+        theme: ThemePayload
+    ) async {
+        if Activity<AlarmActivityAttributes>.activities.isEmpty {
+            DiagLog.log("[ACT] markFiredNow() no activity → creating at T0")
+            await LAEnsure.ensureAtFireTime(
+                stackID: stackID,
+                stackName: stackName,
+                stepTitle: stepTitle,
+                scheduledEnds: scheduledEnds,
+                alarmID: alarmID,
+                theme: theme
+            )
+            LAEnsure.logFinalPresence(present: true, reason: "created")
+        } else {
+            LAEnsure.logFinalPresence(present: true, reason: "updated")
+        }
+    }
 }
