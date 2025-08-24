@@ -137,7 +137,7 @@ private enum LAViewLogger {
     }
 }
 
-// MARK: - Live Activity lock-screen root (Liquid Glass: let system draw it)
+// MARK: - Live Activity lock-screen root (Liquid Glass)
 private struct AlarmActivityLockRoot: View {
     let context: ActivityViewContext<AlarmActivityAttributes>
 
@@ -199,8 +199,8 @@ private struct AlarmActivityLockRoot: View {
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
-        .applyLiveActivityTheme()                  // accent only
-        .activityBackgroundTint(.clear)            // Liquid Glass background (system material)
+        .tint(accent)                       // ✅ explicit accent only
+        .activityBackgroundTint(.clear)     // ✅ system Liquid Glass background
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
         .onAppear { LAViewLogger.logRender(surface: "lock", state: context.state) }
