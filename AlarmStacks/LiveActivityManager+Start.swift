@@ -135,7 +135,10 @@ extension LiveActivityManager {
         if lead > LA.nearWindow {
             if let a = existingExact {
                 let st = a.content.state
-                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                await a.end(
+                    ActivityContent(state: st, staleDate: nil),
+                    dismissalPolicy: .immediate
+                )
                 DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
             } else {
                 DiagLog.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → keep bridge/none")

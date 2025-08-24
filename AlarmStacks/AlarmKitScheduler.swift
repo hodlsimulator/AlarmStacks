@@ -29,6 +29,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
     static let protectedWindowSecs  = 12
     static let postAuthSettleMs: UInt64 = 800
 
+    /// Keep in sync with LiveActivityManager+Start near-window logic.
+    private static let nearWindowSeconds: TimeInterval = 2 * 60 * 60
+
     private static let defaultSoundFilename: String? = nil
 
     private var hasScheduledOnceAK: Bool {
@@ -129,6 +132,8 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
            imminent.timeIntervalSinceNow <= TimeInterval(Self.protectedWindowSecs) {
             DiagLog.log("AK schedule SKIP (protected window) next=\(DiagLog.f(imminent)) (~\(Int(imminent.timeIntervalSinceNow))s)")
             await LiveActivityManager.prearmIfNeeded(stackID: stack.id.uuidString, effTarget: imminent, calendar: calendar)
+            // Also try to create/update immediately while we’re in the foreground.
+            await LiveActivityManager.attemptStartNow(stackID: stack.id.uuidString, calendar: calendar)
             return defaults.stringArray(forKey: storageKey(for: stack)) ?? []
         }
 
@@ -179,7 +184,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
             if firstNominal == nil {
                 firstNominal = nominalFireDate
-                defaults.set(nominalFireDate.timeIntervalSince1970, forKey: firstTargetKey(forStackID: stack.id.uuidString))
+                let firstKey = firstTargetKey(forStackID: stack.id.uuidString)
+                defaults.set(nominalFireDate.timeIntervalSince1970, forKey: firstKey)
+                groupDefaults?.set(nominalFireDate.timeIntervalSince1970, forKey: firstKey)
             }
 
             // Effective ≥ minLead from now.
@@ -190,8 +197,8 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
 
             let id = UUID()
 
-            // Capture earliest effective target for LA prearm context.
-            if earliestEffTarget == nil {
+            // Capture **earliest** effective target for LA prearm context.
+            if earliestEffTarget == nil || effectiveTarget < earliestEffTarget! {
                 earliestEffTarget = effectiveTarget
                 earliestAlarmID = id
                 earliestStepTitle = step.title
@@ -274,7 +281,9 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         }
 
         if firstRun { hasScheduledOnceAK = true }
-        defaults.set(akIDs.map(\.uuidString), forKey: storageKey(for: stack))
+        let idStrings = akIDs.map(\.uuidString)
+        defaults.set(idStrings, forKey: storageKey(for: stack))
+        groupDefaults?.set(idStrings, forKey: storageKey(for: stack))
 
         // 👉 Provide **flat** payload for LA prearm (no nested content:)
         if let eff = earliestEffTarget,
@@ -296,6 +305,12 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         // ✅ Prearm **once** for the earliest effective target (coalesced + throttled).
         if let eff = earliestEffTarget {
             await LiveActivityManager.prearmIfNeeded(stackID: stack.id.uuidString, effTarget: eff, calendar: calendar)
+
+            // If we’re already inside the “near” window, create/update the LA immediately
+            // while the app is foreground/active so it persists after suspension.
+            if eff.timeIntervalSinceNow <= Self.nearWindowSeconds {
+                await LiveActivityManager.attemptStartNow(stackID: stack.id.uuidString, calendar: calendar)
+            }
         } else {
             LiveActivityManager.cancelPrearm(for: stack.id.uuidString)
         }
@@ -303,7 +318,7 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
         // 🔔 SINGLE place to signal chain change to widget + logs
         ScheduleRevision.bump("chainShift")
 
-        return akIDs.map(\.uuidString)
+        return idStrings
     }
 
     func cancelAll(for stack: Stack) async {
@@ -318,6 +333,11 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
             }
         }
         defaults.removeObject(forKey: key)
+        groupDefaults?.removeObject(forKey: key)
+
+        let firstKey = firstTargetKey(forStackID: stack.id.uuidString)
+        defaults.removeObject(forKey: firstKey)
+        groupDefaults?.removeObject(forKey: firstKey)
     }
 
     func rescheduleAll(stacks: [Stack], calendar: Calendar = .current) async {
@@ -409,8 +429,11 @@ final class AlarmKitScheduler: ChainAlarmSchedulingAdapter {
                     )
                 )
 
-                // When adapter schedules ad-hoc, refresh the LA plan to the new near-term target.
+                // Refresh the LA plan to the new near-term target, and if we're inside the window, start now.
                 await LiveActivityManager.prearmIfNeeded(stackID: stackID, effTarget: target)
+                if target.timeIntervalSinceNow <= Self.nearWindowSeconds {
+                    await LiveActivityManager.attemptStartNow(stackID: stackID)
+                }
 
                 // 🔔 Inform widget about this ad-hoc schedule
                 ScheduleRevision.bump("adapterSchedule")

@@ -141,8 +141,13 @@ final class AlarmController: ObservableObject {
                         }
                         // -----------------------------------------
 
-                        // Live Activity stamp
-                        Task { LiveActivityManager.markFiredNow() }
+                        // 🔔 Live Activity: prefer stack-aware hook; fallback to generic mark if unknown.
+                        let sid = UserDefaults.standard.string(forKey: "ak.stackID.\(a.id.uuidString)") ?? ""
+                        if sid.isEmpty {
+                            Task { LiveActivityManager.markFiredNow() }
+                        } else {
+                            self.la_onAKAlerting(stackID: sid, alarmID: a.id.uuidString)
+                        }
                     } else {
                         self.alertingAlarm = nil
                     }
@@ -165,6 +170,12 @@ final class AlarmController: ObservableObject {
         #if canImport(AlarmKit)
         try? manager.stop(id: id)
         AKDiag.markStopped(id: id)
+
+        // 🔔 Live Activity end for the owning stack (if we can resolve it)
+        let sid = UserDefaults.standard.string(forKey: "ak.stackID.\(id.uuidString)") ?? ""
+        if sid.isEmpty == false {
+            la_onAKStop(stackID: sid)
+        }
         #endif
     }
 
@@ -198,7 +209,12 @@ final class AlarmController: ObservableObject {
     func auditAKNow() {
         #if canImport(AlarmKit)
         let counts  = Dictionary(grouping: lastSnapshot, by: { $0.state }).mapValues { $0.count }
-        let summary = counts.map { "\($0.key)=\($0.value)" }.sorted().joined().replacingOccurrences(of: "=", with: "=").replacingOccurrences(of: ",", with: " ")
+        let summary = counts
+            .map { "\($0.key)=\($0.value)" }
+            .sorted()
+            .joined()
+            .replacingOccurrences(of: "=", with: "=")
+            .replacingOccurrences(of: ",", with: " ")
         DiagLog.log("AK snapshot size=\(lastSnapshot.count) states{\(summary)} env={\(AppEnv.snapshot())}")
         #endif
     }
