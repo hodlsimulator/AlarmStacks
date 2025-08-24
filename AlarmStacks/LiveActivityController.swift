@@ -53,10 +53,12 @@ final class LiveActivityController {
             DiagLog.log("[ACT] prearmOrUpdate: activities disabled; stack=\(stackID)")
             return
         }
-
-        // Local kill-switch
         if LAFlags.deviceDisabled {
             DiagLog.log("[LA] prearm.skip (device disabled) stack=\(stackID)")
+            return
+        }
+        if LACap.inCooldown {
+            DiagLog.log("[ACT] prearm.skip (cooldown) stack=\(stackID)")
             return
         }
 
@@ -72,26 +74,51 @@ final class LiveActivityController {
             return
         }
 
-        // Start new if not present
+        // Start new if not present — request directly (single-shot)
         let attrs = AlarmActivityAttributes(stackID: stackID)
         let content = ActivityContent(
             state: st,
             staleDate: st.ends.addingTimeInterval(120)
         )
+
+        func isCapError(_ e: Error) -> Bool {
+            let s = String(describing: e).lowercased()
+            return s.contains("targetmaximumexceeded") || s.contains("maximum number of activities")
+        }
+
         do {
-            _ = try await LiveActivityGuard.requestWithBestEffort(for: AlarmActivityAttributes.self, cap: 1) {
-                try Activity<AlarmActivityAttributes>.request(
-                    attributes: attrs,
-                    content: content,
-                    pushType: nil
-                )
-            }
+            _ = try Activity<AlarmActivityAttributes>.request(
+                attributes: attrs,
+                content: content,
+                pushType: nil
+            )
             LADiag.logAuthAndActive(from: "prearm.request", stackID: stackID, expectingAlarmID: st.alarmID)
             LADiag.logTimer(whereFrom: "start", start: nil, end: st.ends)
         } catch {
             let msg = "\(error)"
             DiagLog.log("[ACT] prearm.request FAILED stack=\(stackID) error=\(msg)")
             LADiag.logAuthAndActive(from: "prearm.request.fail", stackID: stackID, expectingAlarmID: st.alarmID)
+
+            // NEW: hard reset + single retry when the OS reports caps.
+            if isCapError(error) {
+                await hardResetActivities(reason: "cap.prearm")
+                LACap.enterCooldown(seconds: 90, reason: "targetMaximumExceeded")
+
+                // Try once more if we still have safe lead (planner floor ~48s + small buffer)
+                if st.ends.timeIntervalSinceNow > 52 {
+                    do {
+                        _ = try Activity<AlarmActivityAttributes>.request(
+                            attributes: attrs,
+                            content: content,
+                            pushType: nil
+                        )
+                        LADiag.logAuthAndActive(from: "prearm.request.retry.ok", stackID: stackID, expectingAlarmID: st.alarmID)
+                        LADiag.logTimer(whereFrom: "retry.start", start: nil, end: st.ends)
+                    } catch {
+                        DiagLog.log("[ACT] prearm.request.retry FAILED stack=\(stackID) error=\(error)")
+                    }
+                }
+            }
         }
     }
 
@@ -197,20 +224,66 @@ final class LiveActivityController {
                 DiagLog.log("[ACT] debug.start: device disabled; skipping")
                 return
             }
+
+            // Clear any lingering activities that could trip caps (app + probes)
+            await hardResetActivities(reason: "debug.start")
+
+            func isCapError(_ e: Error) -> Bool {
+                let s = String(describing: e).lowercased()
+                return s.contains("targetmaximumexceeded") || s.contains("maximum number of activities")
+            }
+
             do {
-                _ = try await LiveActivityGuard.requestWithBestEffort(for: AlarmActivityAttributes.self, cap: 1) {
-                    try Activity<AlarmActivityAttributes>.request(
-                        attributes: attrs,
-                        content: content,
-                        pushType: nil
-                    )
-                }
+                _ = try Activity<AlarmActivityAttributes>.request(
+                    attributes: attrs,
+                    content: content,
+                    pushType: nil
+                )
                 LADiag.logAuthAndActive(from: "debug.start", stackID: stackID, expectingAlarmID: st.alarmID)
                 LADiag.logTimer(whereFrom: "start", start: nil, end: ends)
             } catch {
-                DiagLog.log("[ACT] debug.start FAILED error=\(error)")
-                LADiag.logAuthAndActive(from: "debug.start.fail", stackID: stackID, expectingAlarmID: st.alarmID)
+                let msg = "\(error)"
+                DiagLog.log("[ACT] prearm.request FAILED stack=\(stackID) error=\(msg)")
+                LADiag.logAuthAndActive(from: "prearm.request.fail", stackID: stackID, expectingAlarmID: st.alarmID)
+
+                if isCapError(error) {
+                    await hardResetActivities(reason: "cap.prearm")
+                    LACap.enterCooldown(seconds: 90, reason: "targetMaximumExceeded")
+
+                    // single retry if there's still safe lead
+                    if ends.timeIntervalSinceNow > 52 {
+                        do {
+                            _ = try Activity<AlarmActivityAttributes>.request(
+                                attributes: AlarmActivityAttributes(stackID: stackID),
+                                content: content,
+                                pushType: nil
+                            )
+                            LADiag.logAuthAndActive(from: "prearm.request.retry.ok", stackID: stackID, expectingAlarmID: st.alarmID)
+                            LADiag.logTimer(whereFrom: "retry.start", start: nil, end: ends)
+                            return
+                        } catch {
+                            DiagLog.log("[ACT] prearm.request.retry FAILED stack=\(stackID) error=\(error)")
+                        }
+                    }
+                }
             }
         }
+    }
+
+    @MainActor
+    private func hardResetActivities(reason: String) async {
+        // End app's LAs
+        for a in Activity<AlarmActivityAttributes>.activities {
+            let content = ActivityContent(state: a.content.state, staleDate: nil)
+            await a.end(content, dismissalPolicy: .immediate)
+        }
+        // End probe LAs too (they count toward caps)
+        for p in Activity<ASProbeAttributes>.activities {
+            let content = ActivityContent(state: p.content.state, staleDate: nil)
+            await p.end(content, dismissalPolicy: .immediate)
+        }
+        DiagLog.log("[ACT] hardResetActivities reason=\(reason)")
+        // Give the system a short beat to settle.
+        try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
     }
 }

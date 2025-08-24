@@ -14,7 +14,7 @@ import ActivityKit
 import UIKit
 #endif
 
-// MARK: - Static widget (unchanged)
+// MARK: - Static widget
 struct NextAlarmEntry: TimelineEntry { let date: Date; let info: NextAlarmInfo? }
 
 struct NextAlarmProvider: TimelineProvider {
@@ -137,7 +137,7 @@ private enum LAViewLogger {
     }
 }
 
-// MARK: - Live Activity lock-screen root (system background!)
+// MARK: - Live Activity lock-screen root (Liquid Glass: let system draw it)
 private struct AlarmActivityLockRoot: View {
     let context: ActivityViewContext<AlarmActivityAttributes>
 
@@ -199,8 +199,8 @@ private struct AlarmActivityLockRoot: View {
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
-        .applyLiveActivityTheme()                 // accent only
-        // ⛔️ No .containerBackground and no .activityBackgroundTint here
+        .applyLiveActivityTheme()                  // accent only
+        .activityBackgroundTint(.clear)            // Liquid Glass background (system material)
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
         .onAppear { LAViewLogger.logRender(surface: "lock", state: context.state) }
@@ -213,7 +213,6 @@ struct AlarmActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
             AlarmActivityLockRoot(context: context)
-                .containerBackground(.clear, for: .widget)   // ← make LA clear
         } dynamicIsland: { context in
             let accent = context.state.theme.accent.color
 
@@ -293,4 +292,3 @@ struct AlarmStacksWidgetBundle: WidgetBundle {
         #endif
     }
 }
-        
