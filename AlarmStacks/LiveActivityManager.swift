@@ -67,6 +67,9 @@ private let FOREGROUND_TICK: TimeInterval = 30
 /// Bridge fallback: only create/update an LA when we’re very close.
 private let BRIDGE_PREARM_LEAD: TimeInterval = 90 // last 90s only
 
+/// Hard minimum lead time (matches the planner) to avoid the OS late-start guardrails.
+private let HARD_MIN_LEAD_SECONDS: TimeInterval = 48
+
 /// The stack ID we’ll use for the bridge fallback LA.
 private let BRIDGE_STACK_ID = "bridge"
 
@@ -157,7 +160,7 @@ final class LiveActivityManager {
         )
         uiObservers.append(
             NotificationCenter.default.addObserver(
-                forName: UIApplication.protectedDataDidBecomeAvailableNotification,
+                forName: UIApplication.protectedDataDidBecomeAvailableNotification, // ✅ correct name
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -239,6 +242,12 @@ final class LiveActivityManager {
               excludeID: String? = nil,
               nearWindowOverride: TimeInterval? = nil) async {
 
+        // Local kill-switch
+        if LAFlags.deviceDisabled {
+            MiniDiag.log("[ACT] skip stack=\(stackID) device.disabled")
+            return
+        }
+
         // If the user has globally disabled activities, don’t churn.
         let auth = ActivityAuthorizationInfo()
         if !auth.areActivitiesEnabled {
@@ -279,6 +288,15 @@ final class LiveActivityManager {
             return
         }
 
+        // Late-start guard: if we’re inside the OS’s late window and have no activity, don’t thrash.
+        if existing == nil, lead < HARD_MIN_LEAD_SECONDS {
+            MiniDiag.log("[ACT] start SKIP reason=late-window lead=\(Int(lead))s stack=\(stackID)")
+            // A prearm (or bridge) will handle this when possible; still schedule a short retry window.
+            let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
+            scheduleRetry(for: stackID, until: stopBy)
+            return
+        }
+
         var next = AlarmActivityAttributes.ContentState(
             stackName: chosen.stackName,
             stepTitle: chosen.stepTitle,
@@ -308,6 +326,19 @@ final class LiveActivityManager {
             LADiag.logTimer(whereFrom: "refresh.update", start: nil, end: next.ends)
             LADiag.logAuthAndActive(from: "refresh.update", stackID: stackID, expectingAlarmID: next.alarmID)
             cancelRetry(for: stackID)
+            return
+        }
+
+        // Proactively keep the cap to avoid “maximum number of activities” on request.
+        if Activity<AlarmActivityAttributes>.activities.count > 0 {
+            await cleanupOverflow(keeping: nil)
+        }
+
+        // ⬇️ Patch: if app is not active, defer and retry up to +3m after the target.
+        guard isAppActive() else {
+            let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
+            MiniDiag.log("[ACT] start.defer stack=\(stackID) appInactive")
+            scheduleRetry(for: stackID, until: stopBy)
             return
         }
 
@@ -418,7 +449,7 @@ final class LiveActivityManager {
 
         await a.update(ActivityContent(state: st, staleDate: nil))
         MiniDiag.log("[ACT] markFiredNow stack=\(stackID) step=\(st.stepTitle) firedAt=\(firedAt) ends=\(ends) id=\(st.alarmID)")
-        LADiag.logTimer(whereFrom: "markFiredNow", start: firedAt, end: ends)
+        LADiag.logTimer(whereFrom: "markFiredNow", start: firedAt, end: st.ends)
         LADiag.logAuthAndActive(from: "markFiredNow", stackID: stackID, expectingAlarmID: st.alarmID)
     }
 
@@ -566,6 +597,7 @@ final class LiveActivityManager {
     private func prearmFromBridgeIfNeeded(now: Date = .now) async {
         let auth = ActivityAuthorizationInfo()
         guard auth.areActivitiesEnabled else { return }
+        if LAFlags.deviceDisabled { return }
 
         guard let info = NextAlarmBridge.read() else { return }
         let remain = info.fireDate.timeIntervalSince(now)
@@ -582,7 +614,7 @@ final class LiveActivityManager {
             await a.update(ActivityContent(state: st, staleDate: nil))
             MiniDiag.log("[ACT] bridge.update step=\(st.stepTitle) ends=\(st.ends)")
             LADiag.logTimer(whereFrom: "bridge.update", start: nil, end: st.ends)
-        } else {    
+        } else {
             let st = AlarmActivityAttributes.ContentState(
                 stackName: info.stackName,
                 stepTitle: info.stepTitle,

@@ -10,12 +10,18 @@ import ActivityKit
 
 extension LiveActivityManager {
 
-    /// End any live activity for a specific stack id (String, per your attributes).
+    /// End any live activity for a specific stack id.
+    /// Adds a short grace so we don't accidentally end *right* before the fire window.
     @MainActor
-    static func end(forStackID stackID: String) async {
+    static func end(forStackID stackID: String, graceSeconds: TimeInterval = 120) async {
+        let now = Date()
         for activity in Activity<AlarmActivityAttributes>.activities where activity.attributes.stackID == stackID {
-            let finalState = activity.content.state
-            let finalContent = ActivityContent(state: finalState, staleDate: nil)
+            let ends = activity.content.state.ends
+            if now < ends.addingTimeInterval(graceSeconds) {
+                DiagLog.log("[ACT] end.skip (within grace) stack=\(stackID) ends=\(DiagLog.f(ends))")
+                continue
+            }
+            let finalContent = activity.content
             await activity.end(finalContent, dismissalPolicy: .immediate)
         }
     }
@@ -24,13 +30,10 @@ extension LiveActivityManager {
     @MainActor
     static func endAll() async {
         for activity in Activity<AlarmActivityAttributes>.activities {
-            let finalState = activity.content.state
-            let finalContent = ActivityContent(state: finalState, staleDate: nil)
-            await activity.end(finalContent, dismissalPolicy: .immediate)
+            await activity.end(activity.content, dismissalPolicy: .immediate)
         }
     }
 
-    /// Back-compat for older call sites.
     @MainActor
     static func end() async { await endAll() }
 }

@@ -19,7 +19,6 @@ extension LiveActivityManager {
     private static var _plans = [String: Task<Void, Never>]()
     private static let _gate = LAStartGate()
 
-    // Latest payload we should surface in the Live Activity at prearm time.
     public struct LAStartPayload: Sendable {
         public let stackID: String
         public let stackName: String
@@ -28,14 +27,7 @@ extension LiveActivityManager {
         public let allowSnooze: Bool
         public let alarmID: String
         public let theme: ThemePayload
-
-        public init(stackID: String,
-                    stackName: String,
-                    stepTitle: String,
-                    ends: Date,
-                    allowSnooze: Bool,
-                    alarmID: String,
-                    theme: ThemePayload) {
+        public init(stackID: String, stackName: String, stepTitle: String, ends: Date, allowSnooze: Bool, alarmID: String, theme: ThemePayload) {
             self.stackID = stackID
             self.stackName = stackName
             self.stepTitle = stepTitle
@@ -49,7 +41,6 @@ extension LiveActivityManager {
     private static var _latestPayload = [String: LAStartPayload]()
 
     /// Record the latest state that should be shown when we prearm this stack's LA.
-    /// Call this when you schedule/update a step, right before `prearmIfNeeded(...)`.
     public static func recordPrearmContext(_ payload: LAStartPayload) {
         _latestPayload[payload.stackID] = payload
     }
@@ -63,13 +54,12 @@ extension LiveActivityManager {
     /// Safe to call repeatedly — replaces any existing plan for this stack.
     @MainActor
     static func prearmIfNeeded(stackID: String, effTarget: Date, calendar: Calendar = .current) async {
-        // Already due/late → nothing useful to prearm.
-        guard effTarget.timeIntervalSinceNow > 1 else { return }
+        guard effTarget.timeIntervalSinceNow > 1 else { return } // already due
 
         // Replace any prior plan for this stack.
         cancelPrearm(for: stackID)
 
-        // Local kill-switch for debugging.
+        // Local kill-switch
         if LAFlags.deviceDisabled {
             DiagLog.log("[LA] prearm.skip (device disabled) stack=\(stackID)")
             return
@@ -81,25 +71,19 @@ extension LiveActivityManager {
             return
         }
 
-        // Choose sparse offsets to avoid rate-limit (tweak as you like).
-        let offsets: [TimeInterval] = [55, 25]
-
-        // Compute absolute attempt times, drop ones already in the past.
-        let planTimes = offsets
-            .map { effTarget.addingTimeInterval(-$0) }
-            .filter { $0.timeIntervalSinceNow > 0.5 }
+        // Use the planner (e.g. [120, 90, 60, 48]s) and filter to the future.
+        let now = Date()
+        let planTimes = LiveActivityPlanner.plannedAttempts(for: effTarget, now: now)
 
         if planTimes.isEmpty {
-            // We missed our windows; do a single attempt now.
-            if Task.isCancelled == false {
-                await attemptStartNow(stackID: stackID, effTarget: effTarget)
-            }
+            // Missed windows — a single opportunistic attempt (will self-guard).
+            await attemptStartNow(stackID: stackID, effTarget: effTarget)
             return
         }
 
         DiagLog.log("[LA] prearm plan stack=\(stackID) effTarget=\(DiagLog.f(effTarget)) attempts=\(planTimes.map { Int($0.timeIntervalSinceNow) })s")
 
-        // Background plan runner: sleep until each slot then do a gated start attempt.
+        // Background runner: sleep until each slot then do a gated start attempt.
         let task = Task.detached(priority: .background) {
             for t in planTimes {
                 if Task.isCancelled { break }
@@ -114,7 +98,7 @@ extension LiveActivityManager {
         _plans[stackID] = task
     }
 
-    /// Single, gated `start` attempt; does nothing if throttled/disabled.
+    /// Single, gated `start` attempt; does nothing if throttled/disabled/too late.
     @MainActor
     private static func attemptStartNow(stackID: String, effTarget: Date) async {
         if LAFlags.deviceDisabled {
@@ -123,7 +107,8 @@ extension LiveActivityManager {
         }
 
         let remain = effTarget.timeIntervalSinceNow
-        if remain < 25 {
+        // Respect the planner’s hard floor (OS late-start guardrails)
+        if remain < LiveActivityPlanner.hardMinimumLeadSeconds {
             DiagLog.log(String(format: "[LA] prearm.create.skip (too close; remain=%.0fs) stack=%@", remain, stackID))
             return
         }
@@ -136,11 +121,12 @@ extension LiveActivityManager {
 
         DiagLog.log(String(format: "[LA] prearm attempt stack=%@ remain=%.0fs", stackID, remain))
 
-        // <<< NEW: actually start/update our LA using the last known payload for this stack >>>
         guard let p = _latestPayload[stackID] else {
             DiagLog.log("[LA] prearm.attempt.skip (no payload) stack=\(stackID)")
             return
         }
+
+        // Ask the controller to prearm/update. It knows how to classify errors.
         await LiveActivityController.shared.prearmOrUpdate(
             stackID: p.stackID,
             stackName: p.stackName,
@@ -166,10 +152,8 @@ private actor LAStartGate {
     private let minSpacing: TimeInterval = 5
 
     func shouldAttempt(now: Date) -> Bool {
-        // Per-attempt spacing
         if now.timeIntervalSince(lastAttemptAt) < minSpacing { return false }
 
-        // Window accounting
         if now.timeIntervalSince(windowStart) > windowLength {
             windowStart = now
             attemptsInWindow = 0
