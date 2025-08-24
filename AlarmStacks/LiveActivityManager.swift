@@ -160,7 +160,7 @@ final class LiveActivityManager {
         )
         uiObservers.append(
             NotificationCenter.default.addObserver(
-                forName: UIApplication.protectedDataDidBecomeAvailableNotification, // ✅ correct name
+                forName: UIApplication.protectedDataDidBecomeAvailableNotification,
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
@@ -334,7 +334,7 @@ final class LiveActivityManager {
             await cleanupOverflow(keeping: nil)
         }
 
-        // ⬇️ Patch: if app is not active, defer and retry up to +3m after the target.
+        // If app is not active, defer and retry up to +3m after the target.
         guard isAppActive() else {
             let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
             MiniDiag.log("[ACT] start.defer stack=\(stackID) appInactive")
@@ -557,7 +557,7 @@ final class LiveActivityManager {
             await prearmFromBridgeIfNeeded(now: .now) // try once on exit too
         } else {
             for sid in ids {
-                await sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
+                await self.sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
             }
         }
     }

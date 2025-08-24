@@ -6,6 +6,8 @@
 	<string></string>
 	<key>NSAlarmKitUsageDescription</key>
 	<string>We schedule alarms and countdowns for your routine steps.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array/>
 </dict>
