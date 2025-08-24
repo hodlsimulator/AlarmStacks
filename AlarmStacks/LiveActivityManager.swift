@@ -54,8 +54,9 @@ private enum UD {
 /// Don’t surface the LA if the earliest step is too far away (prevents “in 23h” flash).
 private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2h
 
-/// When leaving the app, allow earlier prewarm so we don’t get blocked by `visibility` later.
-private let LEAVE_PREWARM_WINDOW: TimeInterval = 45 * 60 // 45m
+/// When leaving the app, allow earlier prewarm so we don’t get blocked later.
+/// ⬅️ Bumped to the full near window (2h) so we can start while the app is still foreground.
+private let LEAVE_PREWARM_WINDOW: TimeInterval = LA_NEAR_WINDOW
 
 /// Retry cadence + horizon for transient `visibility` / `targetMaximumExceeded`
 private let RETRY_TICK: TimeInterval = 5        // try every 5s
@@ -80,6 +81,22 @@ private func isAppActive() -> Bool {
     #else
     return true
     #endif
+}
+
+@inline(__always)
+private func isDeviceUnlocked() -> Bool {
+    #if canImport(UIKit)
+    return UIApplication.shared.isProtectedDataAvailable
+    #else
+    return true
+    #endif
+}
+
+/// Central eligibility question for *any* Activity.request
+extension LiveActivityManager {
+    static func shouldAttemptRequestsNow() -> Bool {
+        ActivityAuthorizationInfo().areActivitiesEnabled && isAppActive() && isDeviceUnlocked()
+    }
 }
 
 /// Try to pull a stackID string out of any object (e.g. your `Stack` model)
@@ -291,7 +308,6 @@ final class LiveActivityManager {
         // Late-start guard: if we’re inside the OS’s late window and have no activity, don’t thrash.
         if existing == nil, lead < HARD_MIN_LEAD_SECONDS {
             MiniDiag.log("[ACT] start SKIP reason=late-window lead=\(Int(lead))s stack=\(stackID)")
-            // A prearm (or bridge) will handle this when possible; still schedule a short retry window.
             let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
             scheduleRetry(for: stackID, until: stopBy)
             return
@@ -334,10 +350,10 @@ final class LiveActivityManager {
             await cleanupOverflow(keeping: nil)
         }
 
-        // If app is not active, defer and retry up to +3m after the target.
-        guard isAppActive() else {
+        // If app is not active or device is locked, defer with a fast retry window.
+        guard isAppActive(), isDeviceUnlocked() else {
             let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
-            MiniDiag.log("[ACT] start.defer stack=\(stackID) appInactive")
+            MiniDiag.log("[ACT] start.defer stack=\(stackID) not-eligible(fg=\(isAppActive()) unlock=\(isDeviceUnlocked()))")
             scheduleRetry(for: stackID, until: stopBy)
             return
         }
@@ -365,7 +381,7 @@ final class LiveActivityManager {
                 scheduleRetry(for: stackID, until: stopBy)
                 return
             }
-            // Visibility: we’re likely background/locked. Keep trying a bit past target with fast cadence.
+            // Visibility: likely background/locked. Keep trying a bit past target with fast cadence.
             if msg.localizedCaseInsensitiveContains("visibility") {
                 let stopBy = chosen.date.addingTimeInterval(RETRY_AFTER_TARGET)
                 scheduleRetry(for: stackID, until: stopBy)
@@ -551,13 +567,13 @@ final class LiveActivityManager {
         #if canImport(UIKit)
         stopForegroundTick()
         #endif
-        // Prewarm on exit if the next step is within 45 minutes
+        // Prewarm on exit if the next step is within 2h
         let ids = allKnownStackIDs()
         if ids.isEmpty {
             await prearmFromBridgeIfNeeded(now: .now) // try once on exit too
         } else {
             for sid in ids {
-                await self.sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
+                await sync(stackID: sid, reason: "prewarm.willResignActive", nearWindowOverride: LEAVE_PREWARM_WINDOW)
             }
         }
     }
@@ -594,14 +610,17 @@ final class LiveActivityManager {
 
     /// Uses NextAlarmBridge as a safety net to start/update an LA in the last ~90s
     /// even if AlarmKit’s UD keys/stacks aren’t discoverable yet.
+    /// IMPORTANT: Only request when foreground + unlocked + enabled to avoid OS guardrails.
     private func prearmFromBridgeIfNeeded(now: Date = .now) async {
-        let auth = ActivityAuthorizationInfo()
-        guard auth.areActivitiesEnabled else { return }
+        guard LiveActivityManager.shouldAttemptRequestsNow() else {
+            MiniDiag.log("[ACT] bridge.defer not-eligible (fg+unlock+enabled=false)")
+            return
+        }
         if LAFlags.deviceDisabled { return }
 
         guard let info = NextAlarmBridge.read() else { return }
         let remain = info.fireDate.timeIntervalSince(now)
-        guard remain > 0, remain <= BRIDGE_PREARM_LEAD else { return }
+        guard remain > 0, remain <= BRIDGE_PREARM_LEAD else { return } // only last ~90s
 
         // Update existing bridge LA or create a new one.
         if let a = Activity<AlarmActivityAttributes>.activities.first(where: { $0.attributes.stackID == BRIDGE_STACK_ID }) {
@@ -614,7 +633,15 @@ final class LiveActivityManager {
             await a.update(ActivityContent(state: st, staleDate: nil))
             MiniDiag.log("[ACT] bridge.update step=\(st.stepTitle) ends=\(st.ends)")
             LADiag.logTimer(whereFrom: "bridge.update", start: nil, end: st.ends)
-        } else {
+            return
+        }
+
+        // Keep under caps before requesting.
+        if Activity<AlarmActivityAttributes>.activities.count > 0 {
+            await cleanupOverflow(keeping: nil)
+        }
+
+        do {
             let st = AlarmActivityAttributes.ContentState(
                 stackName: info.stackName,
                 stepTitle: info.stepTitle,
@@ -623,17 +650,16 @@ final class LiveActivityManager {
                 alarmID: "",
                 firedAt: nil
             )
-            do {
-                _ = try Activity.request(
-                    attributes: AlarmActivityAttributes(stackID: BRIDGE_STACK_ID),
-                    content: ActivityContent(state: st, staleDate: nil),
-                    pushType: nil
-                )
-                MiniDiag.log("[ACT] bridge.start step=\(st.stepTitle) ends=\(st.ends)")
-                LADiag.logTimer(whereFrom: "bridge.start", start: nil, end: st.ends)
-            } catch {
-                MiniDiag.log("[ACT] bridge.start FAILED error=\(error.localizedDescription)")
-            }
+            _ = try Activity.request(
+                attributes: AlarmActivityAttributes(stackID: BRIDGE_STACK_ID),
+                content: ActivityContent(state: st, staleDate: nil),
+                pushType: nil
+            )
+            MiniDiag.log("[ACT] bridge.start step=\(st.stepTitle) ends=\(st.ends)")
+            LADiag.logTimer(whereFrom: "bridge.start", start: nil, end: st.ends)
+        } catch {
+            // Do NOT set a long cooldown here — let app-life hooks retry at next eligibility.
+            MiniDiag.log("[ACT] bridge.start FAILED error=\(error)")
         }
     }
 }
