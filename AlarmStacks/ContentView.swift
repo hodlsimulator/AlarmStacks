@@ -11,12 +11,33 @@ import SwiftData
 import UIKit
 #endif
 
+// MARK: - Root with bottom toolbar (tab bar)
+
+struct ContentView: View {
+    enum Tab: Hashable { case stacks, timer }
+    @State private var selectedTab: Tab = .stacks
+
+    var body: some View {
+        TabView(selection: $selectedTab) {
+            StacksHomeView()
+                .tabItem { Label("Stacks", systemImage: "alarm") }
+                .tag(Tab.stacks)
+
+            TimerView()
+                .tabItem { Label("Timer", systemImage: "timer") }
+                .tag(Tab.timer)
+        }
+    }
+}
+
+// MARK: - StacksHomeView (moved from old ContentView with no visual changes)
+
 private struct ShareItem: Identifiable {
     let id = UUID()
     let url: URL
 }
 
-struct ContentView: View {
+private struct StacksHomeView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.colorScheme)  private var systemScheme
     @Environment(\.scenePhase)   private var scenePhase

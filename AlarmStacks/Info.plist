@@ -5,9 +5,7 @@
 	<key></key>
 	<string></string>
 	<key>NSAlarmKitUsageDescription</key>
-	<string>We schedule alarms and countdowns for your routine steps.</string>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
+	<string>Allow AlarmStacks to schedule alarms and countdown timers so they ring on time with sound, even when the app is closed.</string>
 	<key>UIBackgroundModes</key>
 	<array/>
 </dict>

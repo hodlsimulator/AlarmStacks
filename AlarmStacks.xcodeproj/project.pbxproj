@@ -85,6 +85,7 @@
 				MiniDiag.swift,
 				NextAlarmBridge.swift,
 				ThemePayload.swift,
+				TimerLAMetadata.swift,
 				"View+SingleLineTightTail.swift",
 			);
 			target = E12550C12E501624009BE32A /* AlarmStacksWidgetExtension */;

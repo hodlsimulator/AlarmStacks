@@ -7,9 +7,7 @@
 import WidgetKit
 import SwiftUI
 import Foundation
-#if canImport(ActivityKit)
 import ActivityKit
-#endif
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -119,85 +117,44 @@ struct NextAlarmWidget: Widget {
     }
 }
 
-#if canImport(ActivityKit)
-// MARK: - LA time/status helpers (single source of truth)
+// === Live Activity ===
 
 fileprivate struct LATimeDecider {
     static func isPreFire(_ ends: Date, now: Date = .init()) -> Bool {
         return ends.timeIntervalSince(now) > TIMER_EPSILON
     }
-
-    /// Returns the chip text and which time to display.
-    /// - useTimer: show a decreasing timer to `ends`
-    /// - clockDate: absolute time to show when not using a timer
     static func mode(for state: AlarmActivityAttributes.ContentState, now: Date = .init())
       -> (chip: String, useTimer: Bool, clockDate: Date, timerTo: Date)
     {
         let pre = isPreFire(state.ends, now: now)
         if pre {
-            // Future → countdown + "Next step"
             return ("NEXT STEP", true, state.ends, state.ends)
         } else {
-            // At/after boundary → never show timer
             if let fired = state.firedAt {
-                // Prefer the actual fired moment when ringing
                 return ("RINGING", false, fired, state.ends)
             } else {
-                // Edge/race: not flagged as ringing; fall back to the scheduled time
                 return ("NEXT STEP", false, state.ends, state.ends)
             }
         }
     }
 }
 
-// MARK: - LA view logger (extension-only, throttled)
-private enum LAViewLogger {
-    private static let logKey = "diag.log.lines"
-
-    // ISO-ish local timestamp (matches DiagnosticsLog.swift style)
-    private static let fmt: DateFormatter = {
-        let f = DateFormatter()
-        f.calendar = .init(identifier: .iso8601)
-        f.locale   = .init(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS ZZZZZ"
-        return f
-    }()
-
-    // 🚦 Throttle: at most one line per surface every ~1.25s
-    private static let throttleS: TimeInterval = 1.25
-    private static var lastLogAt: [String: Date] = [:]
-
-    private static func shouldLog(surface: String, now: Date = .init()) -> Bool {
-        if let prev = lastLogAt[surface], now.timeIntervalSince(prev) < throttleS { return false }
-        lastLogAt[surface] = now
-        return true
-    }
-
-    private static func append(_ line: String) {
-        let stamp = "[\(fmt.string(from: .init())) | up:\(String(format:"%.3f", ProcessInfo.processInfo.systemUptime))s]"
-        let full  = "\(stamp) \(line)"
-        let ud = UserDefaults(suiteName: AppGroups.main)
-        var lines = ud?.stringArray(forKey: logKey) ?? []
-        lines.append(full)
-        if lines.count > 2000 { lines.removeFirst(lines.count - 2000) }
-        ud?.set(lines, forKey: logKey)
-    }
-
-    static func logRender(surface: String, state: AlarmActivityAttributes.ContentState) {
-        guard shouldLog(surface: surface) else { return }
-        let m = LATimeDecider.mode(for: state)
-        append("[LA] render surface=\(surface) chip=\(m.chip) useTimer=\(m.useTimer ? "y" : "n") ends=\(fmt.string(from: state.ends)) firedAt=\(state.firedAt.map(fmt.string(from:)) ?? "-") stack=\(state.stackName) step=\(state.stepTitle) id=\(state.alarmID.isEmpty ? "-" : state.alarmID)")
+// Make timer digits look “right” (less blocky than .heavy)
+fileprivate enum TimerStyle {
+    static let lockFont   : Font = .system(size: 52, weight: .bold,  design: .rounded)
+    static let islandFont : Font = .system(size: 34, weight: .bold,  design: .rounded)
+    static func isTimer(_ s: AlarmActivityAttributes.ContentState) -> Bool {
+        s.stackName.hasPrefix("⏱") || s.stepTitle.lowercased() == "timer"
     }
 }
 
-// MARK: - Live Activity lock-screen root (Liquid Glass)
 private struct AlarmActivityLockRoot: View {
     let context: ActivityViewContext<AlarmActivityAttributes>
 
     var body: some View {
         let accent = context.state.theme.accent.color
         let m = LATimeDecider.mode(for: context.state)
+        let isTimer = TimerStyle.isTimer(context.state)
 
         VStack(spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
@@ -246,7 +203,7 @@ private struct AlarmActivityLockRoot: View {
                         Text(m.clockDate, style: .time).monospacedDigit()
                     }
                 }
-                .font(.title.weight(.bold))
+                .font(isTimer ? TimerStyle.lockFont : .title.weight(.semibold))
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
                 .multilineTextAlignment(.trailing)
@@ -254,16 +211,13 @@ private struct AlarmActivityLockRoot: View {
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)
-        .tint(accent)                       // ✅ explicit accent only
-        .activityBackgroundTint(.clear)     // ✅ system Liquid Glass background
+        .tint(accent)
+        .activityBackgroundTint(.clear)
         .activitySystemActionForegroundColor(.primary)
         .widgetURL(URL(string: "alarmstacks://activity/open"))
-        .onAppear { LAViewLogger.logRender(surface: "lock", state: context.state) }
-        .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "lock", state: s) }
     }
 }
 
-// MARK: - Dynamic Island
 struct AlarmActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: AlarmActivityAttributes.self) { context in
@@ -271,11 +225,11 @@ struct AlarmActivityWidget: Widget {
         } dynamicIsland: { context in
             let accent = context.state.theme.accent.color
             let m = LATimeDecider.mode(for: context.state)
+            let isTimer = TimerStyle.isTimer(context.state)
 
             return DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     Image(systemName: "alarm.fill").foregroundStyle(accent)
-                        .onAppear { LAViewLogger.logRender(surface: "island.expanded.leading", state: context.state) }
                 }
                 DynamicIslandExpandedRegion(.center) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -293,31 +247,24 @@ struct AlarmActivityWidget: Widget {
                             .foregroundStyle(.secondary)
                             .singleLineTightTail()
                     }
-                    .onAppear { LAViewLogger.logRender(surface: "island.expanded.center", state: context.state) }
-                    .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.expanded.center", state: s) }
                 }
                 DynamicIslandExpandedRegion(.trailing) { EmptyView() }
                 DynamicIslandExpandedRegion(.bottom) {
                     HStack {
                         Group {
                             if m.useTimer {
-                                Text(m.timerTo, style: .timer)
-                                    .monospacedDigit()
-                                    .minimumScaleFactor(0.7)
-                                    .lineLimit(1)
+                                Text(m.timerTo, style: .timer).monospacedDigit()
                             } else {
                                 Text(m.clockDate, style: .time).monospacedDigit()
                             }
                         }
-                        .font(.title3.weight(.semibold))
+                        .font(isTimer ? TimerStyle.islandFont : .title3.weight(.semibold))
                         Spacer(minLength: 0)
                     }
                 }
             } compactLeading: {
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
-                    .onAppear { LAViewLogger.logRender(surface: "island.compact.leading", state: context.state) }
             } compactTrailing: {
-                // Compact trailing MUST never count up; keep monospaced & single line.
                 Group {
                     if m.useTimer {
                         Text(m.timerTo, style: .timer).monospacedDigit()
@@ -328,25 +275,19 @@ struct AlarmActivityWidget: Widget {
                 .minimumScaleFactor(0.7)
                 .lineLimit(1)
                 .multilineTextAlignment(.trailing)
-                .onAppear { LAViewLogger.logRender(surface: "island.compact.trailing", state: context.state) }
-                .onChange(of: context.state) { _, s in LAViewLogger.logRender(surface: "island.compact.trailing", state: s) }
             } minimal: {
-                // Minimal is glyph-only by design.
                 Image(systemName: "alarm.fill").foregroundStyle(accent)
-                    .onAppear { LAViewLogger.logRender(surface: "island.minimal", state: context.state) }
             }
             .keylineTint(accent)
         }
     }
 }
-#endif
 
 @main
 struct AlarmStacksWidgetBundle: WidgetBundle {
     var body: some Widget {
         NextAlarmWidget()
-        #if canImport(ActivityKit)
         AlarmActivityWidget()
-        #endif
+        // ⛔️ Do NOT include any separate Timer LA widget — this keeps only one LA.
     }
 }
