@@ -122,6 +122,32 @@ enum LAEnsure {
         4_800_000_000  // 4.8s
     ]
 
+    // MARK: - Initial render clamp (fixes "23h to go" flash)
+
+    /// Prefer a near-term end time on the very first render so we don't flash a far-future target.
+    private static let initialMinLeadSeconds: TimeInterval = 60      // your 1-minute lead
+    private static let initialClampHorizonSeconds: TimeInterval = 120 // only clamp if proposed end is >2m away
+
+    /// If this is the first render (no existing Activity), clamp the proposed `ends` to now+minLead
+    /// when the candidate is far in the future. Subsequent updates are left untouched.
+    private static func clampedStateForInitialRender(
+        stackID: String,
+        original: AlarmActivityAttributes.ContentState
+    ) -> AlarmActivityAttributes.ContentState {
+        var st = original
+        let now = Date()
+        let remaining = st.ends.timeIntervalSince(now)
+
+        // Only intervene if the scheduler handed us a far-future target.
+        if remaining > initialClampHorizonSeconds {
+            let near = now.addingTimeInterval(initialMinLeadSeconds)
+            if near < st.ends {
+                st.ends = near
+            }
+        }
+        return st
+    }
+
     // MARK: - Prearm planner
 
     /// Schedule “prearm” re-ensures as we approach the fire time.
@@ -138,7 +164,7 @@ enum LAEnsure {
         stackID: String,
         state: AlarmActivityAttributes.ContentState
     ) async {
-        // If we already have an LA for this stack, update it.
+        // If we already have an LA for this stack, update it as-is.
         if let a = findExisting(stackID: stackID) {
             let content = ActivityContent(state: state, staleDate: nil)
             await a.update(content)
@@ -150,25 +176,28 @@ enum LAEnsure {
             return
         }
 
+        // First render path: clamp far-future ends to a near-term (now+minLead) so UI doesn't show "23h".
+        let firstRenderState = clampedStateForInitialRender(stackID: stackID, original: state)
+
         // Otherwise, attempt to request a new LA (respect app visibility/eligibility).
         do {
             if !appEligibleForLiveActivityStart() {
                 DiagLog.log("[ACT] reliability.start FAILED stack=\(stackID) error=visibility")
-                LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: state.alarmID)
-                snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: state.alarmID)
-                await kickEnsureRetryIfNeeded(stackID: stackID, state: state, attempt: 1)
+                LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: firstRenderState.alarmID)
+                snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: firstRenderState.alarmID)
+                await kickEnsureRetryIfNeeded(stackID: stackID, state: firstRenderState, attempt: 1)
                 return
             }
 
             let attrs   = AlarmActivityAttributes(stackID: stackID)
-            let content = ActivityContent(state: state, staleDate: nil)
+            let content = ActivityContent(state: firstRenderState, staleDate: nil)
             _ = try Activity<AlarmActivityAttributes>.request(attributes: attrs, content: content, pushType: nil)
 
-            DiagLog.log("[ACT] reliability.start stack=\(stackID) step=\(state.stepTitle) ends=\(DiagLog.f(state.ends)) id=\(state.alarmID)")
-            LADiag.logTimer(whereFrom: "reliability.start", start: state.firedAt, end: state.ends)
-            LADiag.logAuthAndActive(from: "reliability.start", stackID: stackID, expectingAlarmID: state.alarmID)
-            snapshotState(from: "reliability.start", stackID: stackID, expecting: state.alarmID)
-            planPrearmTimers(stackID: stackID, state: state)
+            DiagLog.log("[ACT] reliability.start stack=\(stackID) step=\(firstRenderState.stepTitle) ends=\(DiagLog.f(firstRenderState.ends)) id=\(firstRenderState.alarmID)")
+            LADiag.logTimer(whereFrom: "reliability.start", start: firstRenderState.firedAt, end: firstRenderState.ends)
+            LADiag.logAuthAndActive(from: "reliability.start", stackID: stackID, expectingAlarmID: firstRenderState.alarmID)
+            snapshotState(from: "reliability.start", stackID: stackID, expecting: firstRenderState.alarmID)
+            planPrearmTimers(stackID: stackID, state: firstRenderState)
         } catch {
             let msg = error.localizedDescription.lowercased()
             if msg.contains("visibility") || msg.contains("inactive") || msg.contains("protected data") {
@@ -176,9 +205,9 @@ enum LAEnsure {
             } else {
                 DiagLog.log("[ACT] reliability.start FAILED stack=\(stackID) error=\(error)")
             }
-            LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: state.alarmID)
-            snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: state.alarmID)
-            await kickEnsureRetryIfNeeded(stackID: stackID, state: state, attempt: 1)
+            LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: firstRenderState.alarmID)
+            snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: firstRenderState.alarmID)
+            await kickEnsureRetryIfNeeded(stackID: stackID, state: firstRenderState, attempt: 1)
         }
     }
 
@@ -456,7 +485,7 @@ enum LAEnsure {
             }
         }
 
-        // If an activity materialized meanwhile, just update it.
+        // If an activity materialised meanwhile, just update it.
         if let existing = findExisting(stackID: stackID) {
             await existing.update(ActivityContent(state: state, staleDate: nil))
             LADiag.logTimer(whereFrom: "ensure.retry.update", start: state.firedAt, end: state.ends)
@@ -466,22 +495,25 @@ enum LAEnsure {
             return
         }
 
+        // Still first render; apply the same near-term clamp before requesting.
+        let firstRenderState = clampedStateForInitialRender(stackID: stackID, original: state)
+
         // Try requesting again.
         do {
             if !appEligibleForLiveActivityStart() {
-                await kickEnsureRetryIfNeeded(stackID: stackID, state: state, attempt: attempt + 1)
+                await kickEnsureRetryIfNeeded(stackID: stackID, state: firstRenderState, attempt: attempt + 1)
                 return
             }
 
             let attrs   = AlarmActivityAttributes(stackID: stackID)
-            let content = ActivityContent(state: state, staleDate: nil)
+            let content = ActivityContent(state: firstRenderState, staleDate: nil)
             _ = try Activity<AlarmActivityAttributes>.request(attributes: attrs, content: content, pushType: nil)
 
-            DiagLog.log("[ACT] reliability.start stack=\(stackID) step=\(state.stepTitle) ends=\(DiagLog.f(state.ends)) id=\(state.alarmID)")
-            LADiag.logTimer(whereFrom: "reliability.start", start: state.firedAt, end: state.ends)
-            LADiag.logAuthAndActive(from: "reliability.start", stackID: stackID, expectingAlarmID: state.alarmID)
-            snapshotState(from: "reliability.start", stackID: stackID, expecting: state.alarmID)
-            planPrearmTimers(stackID: stackID, state: state)
+            DiagLog.log("[ACT] reliability.start stack=\(stackID) step=\(firstRenderState.stepTitle) ends=\(DiagLog.f(firstRenderState.ends)) id=\(firstRenderState.alarmID)")
+            LADiag.logTimer(whereFrom: "reliability.start", start: firstRenderState.firedAt, end: firstRenderState.ends)
+            LADiag.logAuthAndActive(from: "reliability.start", stackID: stackID, expectingAlarmID: firstRenderState.alarmID)
+            snapshotState(from: "reliability.start", stackID: stackID, expecting: firstRenderState.alarmID)
+            planPrearmTimers(stackID: stackID, state: firstRenderState)
         } catch {
             let msg = error.localizedDescription.lowercased()
             if msg.contains("visibility") || msg.contains("inactive") || msg.contains("protected data") {
@@ -489,9 +521,9 @@ enum LAEnsure {
             } else {
                 DiagLog.log("[ACT] reliability.start FAILED stack=\(stackID) error=\(error)")
             }
-            LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: state.alarmID)
-            snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: state.alarmID)
-            await kickEnsureRetryIfNeeded(stackID: stackID, state: state, attempt: attempt + 1)
+            LADiag.logAuthAndActive(from: "reliability.start.failed", stackID: stackID, expectingAlarmID: firstRenderState.alarmID)
+            snapshotState(from: "reliability.start.failed", stackID: stackID, expecting: firstRenderState.alarmID)
+            await kickEnsureRetryIfNeeded(stackID: stackID, state: firstRenderState, attempt: attempt + 1)
         }
     }
 }
