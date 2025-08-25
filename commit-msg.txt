@@ -1,0 +1,19 @@
+feat(LiveActivity): ungated prearm + scheduler wiring; snooze-chain & diagnostics
+
+- Prearm now coalesces and runs without visibility/“too close” gating.
+- AlarmKitScheduler records flat LAStartPayload and triggers prearm on schedule & snooze.
+- Diagnostics: richer LA/AK stamps, timer boundary evals, CSV export, UN audit.
+- UI tweaks: concise “Next: …” alert titles for AK surfaces.
+
+Session logs:
+StoreKitLocalTesting: StoreKitTest module not available; skipping local session
+[SAN] launch=launch mode=active notif=debug_build
+[SAN] snapshot tracked=3 meta=24 orphans=21 broken=0 snoozeOrphans=0 expired=0 oldGen=0 cancelled=0
+[RECON] found next id=7670906D-19EA-4AA8-ABE9-904B03E52D12 date=2025-08-25T22:53:00Z
+[SAN] end elapsedMs=2
+Couldn't read values in CFPrefsPlistSource<0x108448b00> (Domain: group.com.hodlsimulator.alarmstacks, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: Yes): Using kCFPreferencesAnyUser with a container is only allowed for System Containers, detaching from cfprefsd
+SK2 fetched 3 products: com.hodlsimulator.alarmstacks.plus.lifetime, com.hodlsimulator.alarmstacks.plus.monthly, com.hodlsimulator.alarmstacks.plus.yearly
+Started observing Transaction.updates.
+SK2 fetched 3 products: com.hodlsimulator.alarmstacks.plus.lifetime, com.hodlsimulator.alarmstacks.plus.monthly, com.hodlsimulator.alarmstacks.plus.yearly
+[SAN] launch=foreground mode=active notif=debug_build
+…(rest of your logs here exactly as pasted)…

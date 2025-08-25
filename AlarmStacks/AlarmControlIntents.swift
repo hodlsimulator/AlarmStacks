@@ -11,6 +11,9 @@ import ActivityKit
 import AlarmKit
 import SwiftUI
 import WidgetKit
+#if canImport(UIKit)
+import UIKit
+#endif
 
 nonisolated struct IntentsMetadata: AlarmMetadata {}
 
@@ -123,10 +126,17 @@ private enum UD {
 // Don’t surface LA if the nearest step is too far away (prevents “in 23h” flashes)
 private let LA_NEAR_WINDOW: TimeInterval = 2 * 60 * 60 // 2 hours
 
+// Authoritativeness for refresh: ambient (keep if uncertain) vs stop-driven (end)
+private enum RefreshMode { case ambient, authoritative }
+
 // MARK: - Minimal LA refresh (local, avoids depending on LiveActivityManager type)
 
 @MainActor
-private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = nil) async {
+private func refreshActivityFromAppGroup(
+    stackID: String,
+    excludeID: String? = nil,
+    mode: RefreshMode = .ambient
+) async {
     let ids: [String] = UD.rStringArray(storageKey(forStackID: stackID))
     let now = Date()
 
@@ -134,11 +144,18 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
     let existing = Activity<AlarmActivityAttributes>.activities
         .first(where: { $0.attributes.stackID == stackID })
 
+    // No tracked IDs → end only in authoritative mode
     guard ids.isEmpty == false else {
         if let a = existing {
-            let st = a.content.state
-            await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
+            if mode == .authoritative {
+                let st = a.content.state
+                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-tracked → end")
+            } else {
+                MiniDiag.log("[ACT] refresh.noTracked.keep stack=\(stackID)")
+            }
+        } else {
+            MiniDiag.log("[ACT] refresh.noTracked stack=\(stackID) (no existing) → no-op")
         }
         return
     }
@@ -175,8 +192,7 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
             return nil
         }()
 
-        guard let d = date else { continue }
-        if d < now.addingTimeInterval(-2) { continue } // in the past
+        guard let d = date, d >= now.addingTimeInterval(-2) else { continue }
 
         if let b = best {
             if d < b.date {
@@ -187,11 +203,19 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
         }
     }
 
+    // If we couldn't compute a future candidate, end only when authoritative.
     guard let chosen = best else {
         if let a = existing {
-            let st = a.content.state
-            await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-future → end")
+            if mode == .authoritative {
+                let st = a.content.state
+                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                MiniDiag.log("[ACT] refresh.end stack=\(stackID) no-future → end")
+            } else {
+                let lead = a.content.state.ends.timeIntervalSince(now)
+                MiniDiag.log(String(format: "[ACT] refresh.noFuture.keep stack=%@ lead=%.0fs", stackID, lead))
+            }
+        } else {
+            MiniDiag.log("[ACT] refresh.noFuture stack=\(stackID) (no existing) → no-op")
         }
         return
     }
@@ -200,9 +224,18 @@ private func refreshActivityFromAppGroup(stackID: String, excludeID: String? = n
     let lead = chosen.date.timeIntervalSince(now)
     if lead > LA_NEAR_WINDOW {
         if let a = existing {
+            #if canImport(UIKit)
+            if UIApplication.shared.applicationState != .background {
+                let st = a.content.state
+                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+            } else {
+                MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s (bg) → keep")
+            }
+            #else
             let st = a.content.state
             await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-            MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
+            #endif
         } else {
             MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
         }
@@ -262,8 +295,12 @@ struct StopAlarmIntent: AppIntent, LiveActivityIntent {
 
         if let stackID = resolvedStackID {
             MiniDiag.log("[ACT] stop.resolve stack=\(stackID)")
-            // Exclude the just-stopped id so we don't pick it again.
-            await refreshActivityFromAppGroup(stackID: stackID, excludeID: id.uuidString)
+            // Exclude the just-stopped id so we don't pick it again; end LA if that was the last step.
+            await refreshActivityFromAppGroup(
+                stackID: stackID,
+                excludeID: id.uuidString,
+                mode: .authoritative
+            )
         } else {
             // Fallback: clear ringing flag on any visible activity.
             MiniDiag.log("[ACT] stop.fallback (no stackID) cleared firedAt on visible activities")
@@ -397,8 +434,10 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
         // Map base -> snooze only after success.
         UD.set(snoozeID.uuidString, forKey: snoozeMapKey(for: baseID))
 
+        let deltaStr = String(format: "%.3fs", delta)
+        let baseOffsetStr = String(format: "%.1fs", baseOffset)
         MiniDiag.log(
-            "AK snooze schedule base=\(baseID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(newBase) Δ=\(String(format: "%.3fs", delta)) baseOffset=\(String(format: "%.1fs", baseOffset)) isFirst=\(isFirst ? "y" : "n")"
+            "AK snooze schedule base=\(baseID.uuidString) id=\(snoozeID.uuidString) secs=\(snoozeSecs) effTarget=\(newBase) Δ=\(deltaStr) baseOffset=\(baseOffsetStr) isFirst=\(isFirst ? "y" : "n")"
         )
 
         // Replace base in tracked list with snooze id, adjust successors
@@ -456,9 +495,11 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
             UD.set(baseOffset + delta, forKey: offsetFromFirstKey(for: baseID))
         }
 
+        let deltaStr = String(format: "%.3fs", delta)
+        let baseOffsetStr = String(format: "%.1fs", baseOffset)
         MiniDiag.log(String(
-            format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%+.3fs baseOffset=%.1fs isFirst=%@",
-            stackID, baseID.uuidString, snoozeID.uuidString, newBase.description, delta, baseOffset, baseIsFirst ? "y" : "n"
+            format: "[CHAIN] shift stack=%@ base=%@ → snooze=%@ newBase=%@ Δ=%@ baseOffset=%@ isFirst=%@",
+            stackID, baseID.uuidString, snoozeID.uuidString, newBase.description, deltaStr, baseOffsetStr, baseIsFirst ? "y" : "n"
         ))
 
         // Reschedule impacted steps
@@ -558,8 +599,9 @@ struct SnoozeAlarmIntent: AppIntent, LiveActivityIntent {
                 if let i = tracked.firstIndex(of: oldStr) { tracked[i] = newID.uuidString }
                 UD.set(tracked, forKey: storageKey(forStackID: stackID))
 
+                let newOffsetStr = String(format: "%.1fs", newOffset)
                 MiniDiag.log(
-                    "[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(String(format: "%.1fs", newOffset)) newTarget=\(newNominal) enforcedLead=\(enforcedStr) kind=timer allowSnooze=\(allow)"
+                    "[CHAIN] resched id=\(newID.uuidString) prev=\(oldID.uuidString) newOffset=\(newOffsetStr) newTarget=\(newNominal) enforcedLead=\(enforcedStr) kind=timer allowSnooze=\(allow)"
                 )
             } catch {
                 // Clean the pre-persisted keys if the new schedule failed

@@ -38,7 +38,7 @@ final class LiveActivityController {
 
         let stores: [UserDefaults] = {
             var a: [UserDefaults] = [UserDefaults.standard]
-            if let g = UserDefaults(suiteName: SharedIDs.appGroup) { a.append(g) }
+            if let g = UserDefaults(suiteName: AppGroups.main) { a.append(g) }
             return a
         }()
 
@@ -65,7 +65,7 @@ final class LiveActivityController {
 
     // MARK: - Group reads (for T-0 fallback)
 
-    private func groupUD() -> UserDefaults? { UserDefaults(suiteName: SharedIDs.appGroup) }
+    private func groupUD() -> UserDefaults? { UserDefaults(suiteName: AppGroups.main) }
 
     private func readDouble(_ key: String) -> Double? {
         if let v = groupUD()?.object(forKey: key) as? Double { return v }

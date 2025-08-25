@@ -13,6 +13,7 @@ import os
 /// Coalesced, throttled pre-arm for Live Activities.
 /// Modified to: no visibility gate, no “too close” hard floor, and
 /// to persist minimal context so `refreshFromGroup` can build the LA.
+@MainActor
 extension LiveActivityManager {
 
     private static let _log = Logger(subsystem: "com.hodlsimulator.alarmstacks", category: "LA.Prearm")
@@ -112,7 +113,6 @@ extension LiveActivityManager {
 
     /// Plan a few **throttled** start attempts so the LA is reliably up before `effTarget`.
     /// Safe to call repeatedly — replaces any existing plan for this stack.
-    @MainActor
     static func prearmIfNeeded(stackID: String, effTarget: Date, calendar: Calendar = .current) async {
         guard effTarget.timeIntervalSinceNow > 1 else { return } // already due
 
@@ -135,9 +135,12 @@ extension LiveActivityManager {
         let now = Date()
         let planTimes = LiveActivityPlanner.plannedAttempts(for: effTarget, now: now)
 
+        // Try once immediately so the tile can appear right after setting the time,
+        // even if effTarget is far in the future. Later retries will coalesce and update.
+        await _attemptStartUsingPayload(stackID: stackID, effTarget: effTarget)
+
         if planTimes.isEmpty {
-            // Missed windows — a single opportunistic attempt (no gate).
-            await attemptStartNow(stackID: stackID, effTarget: effTarget)
+            // No future slots — we've already attempted once above.
             return
         }
 
@@ -152,16 +155,16 @@ extension LiveActivityManager {
                 do { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                 catch { break } // cancelled
                 if Task.isCancelled { break }
-                await attemptStartNow(stackID: stackID, effTarget: effTarget)
+                await _attemptStartUsingPayload(stackID: stackID, effTarget: effTarget)
             }
         }
 
         _plans[stackID] = task
     }
 
-    /// Single, ungated `start` attempt (no visibility/“too close” guards).
-    @MainActor
-    private static func attemptStartNow(stackID: String, effTarget: Date) async {
+    /// Single, ungated `start` attempt using the most recent payload.
+    /// (Renamed to avoid clashing with the public shim in AttemptStartNowShims.)
+    private static func _attemptStartUsingPayload(stackID: String, effTarget: Date) async {
         guard let p = _latestPayload[stackID] else {
             DiagLog.log("[LA] prearm.attempt.skip (no payload) stack=\(stackID)")
             return

@@ -61,7 +61,7 @@ private let LEAVE_PREWARM_WINDOW: TimeInterval = 45 * 60 // 45m
 private let FOREGROUND_TICK: TimeInterval = 30
 
 /// Bridge fallback: only create/update an LA when we’re very close.
-private let BRIDGE_PREARM_LEAD: TimeInterval = 90 // last 90s only
+private let BRIDGE_PREARM_LEAD: TimeInterval = 120 // widened from 90s for a little more runway
 
 /// The stack ID we’ll use for the bridge fallback LA.
 private let BRIDGE_STACK_ID = "bridge"
@@ -114,6 +114,8 @@ final class LiveActivityManager {
         #if canImport(UIKit)
         if appIsEligibleForStart() {
             Task { @MainActor in
+                // Cull stranded bridge or obviously wrong items; keep real far-future LAs.
+                await mgr.cullFarFutureActivities()
                 await mgr._onDidBecomeActive()
                 await mgr.prearmFromBridgeIfNeeded() // immediate bridge prearm try
             }
@@ -143,7 +145,10 @@ final class LiveActivityManager {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in await self?._onWillEnterForeground() }
+                Task { @MainActor in
+                    await self?.cullFarFutureActivities()
+                    await self?._onWillEnterForeground()
+                }
             }
         )
         uiObservers.append(
@@ -152,7 +157,10 @@ final class LiveActivityManager {
                 object: nil,
                 queue: .main
             ) { [weak self] _ in
-                Task { @MainActor in await self?._onDidBecomeActive() }
+                Task { @MainActor in
+                    await self?.cullFarFutureActivities()
+                    await self?._onDidBecomeActive()
+                }
             }
         )
         // Some SDKs don’t expose UIApplication.protectedDataDidBecomeAvailable.
@@ -231,6 +239,7 @@ final class LiveActivityManager {
         let existing = Activity<AlarmActivityAttributes>.activities.first { $0.attributes.stackID == stackID }
 
         guard let chosen = nextCandidate(for: stackID, excludeID: excludeID, now: now) else {
+            // No future candidate — do NOT keep stale LAs around.
             if let a = existing {
                 let st = a.content.state
                 await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
@@ -240,22 +249,12 @@ final class LiveActivityManager {
         }
 
         // Far-future guard — avoid early “in 23h” flashes.
+        // ✅ Keep existing LAs parked (don’t end); simply wait to update when we’re near.
         let lead = chosen.date.timeIntervalSince(now)
         let window = nearWindowOverride ?? LA_NEAR_WINDOW
         if lead > window {
-            if let a = existing {
-                #if canImport(UIKit)
-                if appIsEligibleForStart() {
-                    let st = a.content.state
-                    await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                    MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → end")
-                } else {
-                    MiniDiag.log("[ACT] refresh.keep stack=\(stackID) far-future lead=\(Int(lead))s (bg) → keep")
-                }
-                #else
-                let st = a.content.state
-                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
-                #endif
+            if existing != nil {
+                MiniDiag.log("[ACT] refresh.keep stack=\(stackID) far-future lead=\(Int(lead))s → keep")
             } else {
                 MiniDiag.log("[ACT] refresh.skip stack=\(stackID) far-future lead=\(Int(lead))s → no-op")
             }
@@ -279,6 +278,12 @@ final class LiveActivityManager {
         // Unified path: let LAEnsure handle update vs request and any slot reuse.
         await LAEnsure.ensure(stackID: stackID, state: next)
         MiniDiag.log("[ACT] ensure.sync stack=\(stackID) step=\(next.stepTitle) ends=\(next.ends) id=\(next.alarmID)")
+
+        // If a bridge LA is up, retire it now that the real one is ensured.
+        if let bridge = Activity<AlarmActivityAttributes>.activities.first(where: { $0.attributes.stackID == BRIDGE_STACK_ID }) {
+            await bridge.end(ActivityContent(state: bridge.content.state, staleDate: nil), dismissalPolicy: .immediate)
+            MiniDiag.log("[ACT] bridge.end takeover stack=\(stackID)")
+        }
     }
 
     // MARK: - “Ringing” mutation
@@ -311,7 +316,7 @@ final class LiveActivityManager {
         Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: stepTitle) }
     }
     static func markFiredNow(stackID: String, alarmID: String, firedAt: Date, ends: Date) {
-        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends, stepTitle: nil) }
+        Task { @MainActor in await LiveActivityManager.shared._markFiredNow(stackID: stackID, alarmID: alarmID, firedAt: firedAt, ends: ends) }
     }
     static func markFiredNow(stackIDFromAlarm id: String) {
         if let sid = resolveStackIDFromAlarmID(id) {
@@ -328,7 +333,13 @@ final class LiveActivityManager {
         }
     }
 
-    private func _markFiredNow(stackID: String, alarmID: String?, firedAt: Date, ends: Date, stepTitle: String?) async {
+    private func _markFiredNow(
+        stackID: String,
+        alarmID: String?,
+        firedAt: Date,
+        ends: Date,
+        stepTitle: String? = nil
+    ) async {
         var activity = Activity<AlarmActivityAttributes>.activities.first { $0.attributes.stackID == stackID }
         if activity == nil {
             await sync(stackID: stackID, reason: "markFired.ensure")
@@ -390,26 +401,6 @@ final class LiveActivityManager {
             }
         }
         return best
-    }
-
-    // MARK: - Discover stacks so we can prewarm while foreground
-
-    func allKnownStackIDs() -> [String] {
-        var out = Set<String>()
-        let keyPrefix = "alarmkit.ids."
-
-        func harvest(_ dict: [String: Any]) {
-            for (k, _) in dict where k.hasPrefix(keyPrefix) {
-                let sid = String(k.dropFirst(keyPrefix.count))
-                out.insert(sid)
-            }
-        }
-
-        harvest(UserDefaults.standard.dictionaryRepresentation())
-        if let grp = UD.group?.dictionaryRepresentation() {
-            harvest(grp)
-        }
-        return Array(out)
     }
 
     // MARK: - Foreground cadence and app-life handlers
@@ -477,7 +468,7 @@ final class LiveActivityManager {
 
     // MARK: - Bridge fallback prearm (ensures there is *some* LA near fire)
 
-    /// Uses NextAlarmBridge as a safety net to start/update an LA in the last ~90s
+    /// Uses NextAlarmBridge as a safety net to start/update an LA in the last ~2 min
     /// even if AlarmKit’s UD keys/stacks aren’t discoverable yet.
     private func prearmFromBridgeIfNeeded(now: Date = .now) async {
         let auth = ActivityAuthorizationInfo()
@@ -500,6 +491,13 @@ final class LiveActivityManager {
             MiniDiag.log("[ACT] bridge.update step=\(st.stepTitle) ends=\(st.ends)")
             LADiag.logTimer(whereFrom: "bridge.update", start: nil, end: st.ends)
         } else {
+            #if canImport(UIKit)
+            guard appIsEligibleForStart() else {
+                MiniDiag.log("[ACT] bridge.skip notForeground remain=\(Int(remain))s")
+                return
+            }
+            #endif
+
             let st = AlarmActivityAttributes.ContentState(
                 stackName: info.stackName,
                 stepTitle: info.stepTitle,
@@ -518,6 +516,46 @@ final class LiveActivityManager {
                 LADiag.logTimer(whereFrom: "bridge.start", start: nil, end: st.ends)
             } catch {
                 MiniDiag.log("[ACT] bridge.start FAILED error=\(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Discovery helpers
+
+    func allKnownStackIDs() -> [String] {
+        var out = Set<String>()
+        let keyPrefix = "alarmkit.ids."
+
+        func harvest(_ dict: [String: Any]) {
+            for (k, _) in dict where k.hasPrefix(keyPrefix) {
+                let sid = String(k.dropFirst(keyPrefix.count))
+                out.insert(sid)
+            }
+        }
+
+        harvest(UserDefaults.standard.dictionaryRepresentation())
+        if let grp = UD.group?.dictionaryRepresentation() {
+            harvest(grp)
+        }
+        return Array(out)
+    }
+
+    // MARK: - Far-future cull
+
+    private func cullFarFutureActivities() async {
+        let now = Date()
+        for a in Activity<AlarmActivityAttributes>.activities {
+            let lead = a.content.state.ends.timeIntervalSince(now)
+            guard lead > LA_NEAR_WINDOW else { continue }
+
+            if a.attributes.stackID == BRIDGE_STACK_ID {
+                // Bridge should only exist near fire; end if it got stranded.
+                let st = a.content.state
+                await a.end(ActivityContent(state: st, staleDate: nil), dismissalPolicy: .immediate)
+                MiniDiag.log("[ACT] cullFarFuture bridge.end lead=\(Int(lead))s")
+            } else {
+                // Keep real activities parked to avoid churn/visibility issues.
+                MiniDiag.log("[ACT] cullFarFuture.keep stack=\(a.attributes.stackID) lead=\(Int(lead))s")
             }
         }
     }

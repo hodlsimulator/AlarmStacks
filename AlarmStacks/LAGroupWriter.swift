@@ -71,9 +71,20 @@ enum LAGroupWriter {
         // Keep Standard in sync as a fallback (the reader checks both)
         syncStandardMirror(stackID: stackID, alarmID: alarmID)
 
-        // 4) Nudge the LA manager **now** (MainActor) so you see the tile without waiting
-        Task { @MainActor in
-            await LiveActivityManager.ensureFromAppGroup(stackID: stackID)
+        // 4) Nudge logic:
+        //    Do NOT call ensureFromAppGroup for far-future steps — that path may
+        //    immediately end a freshly-started LA (you can see this in logs as
+        //    "refresh.skip ... far-future ... → end").
+        //    Prearm will handle far-future reliably; only nudge when close.
+        let lead = effTarget.timeIntervalSinceNow
+        if lead <= 90 { // within ~1½ minutes, safe to nudge refresher
+            Task { @MainActor in
+                await LiveActivityManager.ensureFromAppGroup(stackID: stackID)
+            }
+        } else {
+            // Far in the future: do nothing here. The prearm pipeline you trigger elsewhere
+            // (recordPrearmContext + prearmIfNeeded) will create/update at the right times
+            // without fighting the refresher's far-future policy.
         }
     }
 
@@ -125,7 +136,6 @@ enum LAGroupWriter {
     private static func syncStandardMirror(stackID: String, alarmID: UUID) {
         guard let g = UD.group else { return }
         let s = UD.standard
-        let idStr = alarmID.uuidString
 
         s.set(readIDs(forStackID: stackID), forKey: Keys.storageKey(forStackID: stackID))
 
