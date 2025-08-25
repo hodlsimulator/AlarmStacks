@@ -11,29 +11,25 @@ import Combine
 
 struct PaywallView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @EnvironmentObject private var router: ModalRouter
     @StateObject private var store = Store.shared
     @State private var purchasingID: String?
 
-    // Spacing controls:
-    private let productsTopNudge: CGFloat = 16    // how far to push the cards down
-    private let copyExtraTop: CGFloat     = 8     // extra distance for the copy vs products
+    // Layout
+    private var isAccessibilitySize: Bool { dynamicTypeSize >= .accessibility1 }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 18) {
-                    // Compact header so products stay visible
                     header
                         .padding(.top, 6)
 
-                    // Products FIRST — and nudged down a bit
+                    // Products section adapts: horizontal cards normally; vertical list at accessibility sizes
                     planCarousel
-                        .padding(.top, productsTopNudge)
 
-                    // Contextual copy — same nudge as products + a little extra
                     contextualNotice
-                        .padding(.top, productsTopNudge + copyExtraTop)
 
                     featureBlurb
 
@@ -43,6 +39,7 @@ struct PaywallView: View {
                         .padding(.top, 2)
                 }
                 .padding(.vertical, 14)
+                .dynamicTypeSize(.xSmall ... .accessibility5)
             }
             .safeAreaInset(edge: .bottom) { Color.clear.frame(height: 16) }
             .navigationTitle("Get Plus")
@@ -73,6 +70,7 @@ struct PaywallView: View {
             }
             Text("AlarmStacks Plus")
                 .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -101,30 +99,62 @@ struct PaywallView: View {
         .padding(.horizontal, 20)
     }
 
+    // MARK: Products
+
     private var planCarousel: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 16) {
-                ForEach(sortedProducts, id: \.id) { product in
-                    PlanCard(
-                        product: product,
-                        style: style(for: product),
-                        isBusy: purchasingID == product.id,
-                        badge: badge(for: product),
-                        subtitle: subtitle(for: product)
-                    ) {
-                        Task {
-                            purchasingID = product.id
-                            defer { purchasingID = nil }
-                            await store.purchase(product)
+        Group {
+            if isAccessibilitySize {
+                // Vertical list to give text plenty of room at larger sizes
+                LazyVStack(spacing: 12) {
+                    ForEach(sortedProducts, id: \.id) { product in
+                        PlanCard(
+                            product: product,
+                            style: style(for: product),
+                            isBusy: purchasingID == product.id,
+                            badge: badge(for: product),
+                            subtitle: subtitle(for: product)
+                        ) {
+                            Task {
+                                purchasingID = product.id
+                                defer { purchasingID = nil }
+                                await store.purchase(product)
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                        .accessibilityHint("Double tap to select \(product.displayName)")
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 4)
+            } else {
+                // Horizontal cards in regular sizes
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) {
+                        ForEach(sortedProducts, id: \.id) { product in
+                            PlanCard(
+                                product: product,
+                                style: style(for: product),
+                                isBusy: purchasingID == product.id,
+                                badge: badge(for: product),
+                                subtitle: subtitle(for: product)
+                            ) {
+                                Task {
+                                    purchasingID = product.id
+                                    defer { purchasingID = nil }
+                                    await store.purchase(product)
+                                }
+                            }
+                            // Fixed width for carousel layout; height grows with content
+                            .frame(width: 236)
+                            .accessibilityHint("Double tap to select \(product.displayName)")
                         }
                     }
-                    .frame(width: 236, height: 164)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 4)
                 }
+                .scrollClipDisabled()
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 4)
         }
-        .scrollClipDisabled()
     }
 
     private var featureBlurb: some View {
@@ -146,6 +176,7 @@ struct PaywallView: View {
             .font(.footnote)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
             .padding(.horizontal, 24)
     }
 
@@ -155,6 +186,7 @@ struct PaywallView: View {
         } label: {
             Text("Restore Purchases")
                 .font(.callout.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -217,10 +249,13 @@ private struct NoticeBlock: View {
                 Text(title)
                     .font(.title3.weight(.semibold))
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 Text(.init(subtitle)) // allows **bold** segments
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             // Compact variant if space is tight
             HStack(spacing: 8) {
@@ -228,6 +263,7 @@ private struct NoticeBlock: View {
                 Text("\(title) — \(subtitle.replacingOccurrences(of: "**", with: ""))")
                     .lineLimit(2)
                     .font(.footnote)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .foregroundStyle(.secondary)
@@ -260,6 +296,7 @@ private struct PlanCard: View {
                             .padding(.vertical, 5)
                             .background(.ultraThinMaterial, in: Capsule())
                             .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -269,23 +306,27 @@ private struct PlanCard: View {
                         Text(style.title)
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Text(product.displayPrice)
                         .font(.largeTitle.weight(.bold))
                         .foregroundStyle(.primary)
+                        .minimumScaleFactor(0.9) // keep prices tidy but readable
+                        .lineLimit(1)
 
                     if !subtitle.isEmpty {
                         Text(subtitle)
                             .font(.footnote)
                             .foregroundStyle(.primary.opacity(0.85))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    Spacer(minLength: 8)
-
+                    // CTA
                     HStack(spacing: 6) {
                         Text(isBusy ? "Purchasing…" : "Continue")
                             .font(.headline)
+                            .fixedSize(horizontal: false, vertical: true)
                         Image(systemName: "chevron.right")
                             .font(.subheadline.weight(.bold))
                     }
@@ -293,11 +334,14 @@ private struct PlanCard: View {
                     .padding(.vertical, 8)
                     .padding(.horizontal, 12)
                     .background(.ultraThinMaterial, in: Capsule())
+                    .accessibilityLabel(isBusy ? "Purchasing" : "Continue")
+                    .accessibilityAddTraits(.isButton)
                 }
                 .padding(18)
             }
         }
         .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(style.title), \(product.displayPrice)")
     }
